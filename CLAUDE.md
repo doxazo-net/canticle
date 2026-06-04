@@ -36,8 +36,6 @@ See `README.md` for flags and examples. Worth flagging: directory mode overrides
 
 ## Style (non-discoverable rules)
 
-- **No emoji** in code, commits, comments, or docs.
-- **No em-dashes** in any output.
 - Conventional commits: `feat:`, `fix:`, `docs:`, `ci:`, `chore:`, etc.
 - `slog` for structured logs; `fmt.Printf` only for direct user-facing CLI output (timer, counts).
 - Wrap errors with `fmt.Errorf("context: %w", err)`.
@@ -67,10 +65,6 @@ Prefer the global slash commands -- they encode the full workflow and stay maint
 - `/security-review` -- security review of pending changes
 
 Typical flow: develop -> `/commit` (repeat) -> `/review` -> fix findings -> `/prep-pr` -> open PR -> CodeRabbit reviews automatically -> `/handle-review` -> `/merge-pr`.
-
-### Review comment scope
-
-**Default: fix now.** Defer to a separate issue only when the fix would fundamentally alter the PR's scope OR touches an unrelated subsystem requiring its own test suite. **Never reply "out of scope" without opening a tracking issue** and linking it from the review reply.
 
 ### Reading PR comments (gh API gotcha)
 
