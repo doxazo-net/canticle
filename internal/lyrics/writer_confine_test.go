@@ -99,6 +99,8 @@ func TestWriteLRC_RefusesNonBaseFilename(t *testing.T) {
 		"../escape.lrc",
 		"sub/escape.lrc",
 		filepath.Join(t.TempDir(), "abs.lrc"), // absolute path
+		".",                                   // current dir
+		"..",                                  // parent dir
 	}
 	for _, name := range cases {
 		if err := w.WriteLRC(syncedSong(), name, root); err == nil {

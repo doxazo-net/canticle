@@ -89,19 +89,21 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) (
 
 	var fn string
 	if filename != "" {
+		// The provided filename must be a single path component. Reject ".",
+		// "..", any path separator, or an absolute path so a crafted filename
+		// cannot traverse out of outdir (or target outdir/its parent) via the
+		// filepath.Join below -- defense in depth alongside the confinement-root
+		// re-resolution that follows. Validate the raw input here, before the
+		// extension swap turns "."/".." into harmless-looking ".lrc"/"..lrc".
+		if filename == "." || filename == ".." || filename != filepath.Base(filename) ||
+			filepath.IsAbs(filename) || strings.ContainsAny(filename, `/\`) {
+			return fmt.Errorf("refusing to write: output filename %q is not a base name", filename)
+		}
 		// In dir mode the scanner sets an explicit .lrc filename. Swap the
 		// extension to match the content type (.lrc only for synced lyrics).
 		fn = strings.TrimSuffix(filename, filepath.Ext(filename)) + ext
 	} else {
 		fn = Slugify(fmt.Sprintf("%s - %s", song.Track.ArtistName, song.Track.TrackName)) + ext
-	}
-
-	// The output filename must be a single path component. Reject path
-	// separators or an absolute path so a crafted filename cannot traverse out
-	// of outdir via filepath.Join below (defense in depth alongside the
-	// confinement-root re-resolution that follows).
-	if filepath.IsAbs(fn) || strings.ContainsAny(fn, `/\`) {
-		return fmt.Errorf("refusing to write: output filename %q is not a base name", fn)
 	}
 
 	// When the output directory falls under a confinement root, re-resolve and
