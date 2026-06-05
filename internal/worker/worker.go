@@ -43,10 +43,10 @@ const defaultCircuitOpenDuration = 30 * time.Minute
 // benign miss (no matching track, or a match with no usable lyrics). A miss
 // is not our failure and does not retire the queue row, but the catalog
 // rarely gains the missing lyrics on an hourly cadence, so a generous
-// days-scale cooldown keeps
-// the worker from re-querying upstream for the same dead track on every
-// library scan. Unlike geometric backoff, this delay does not ramp with the
-// attempt count: each re-check waits the same fixed window.
+// days-scale cooldown keeps the worker from re-querying upstream for the
+// same dead track on every library scan. Unlike geometric backoff, this
+// delay does not ramp with the attempt count: each re-check waits the same
+// fixed window.
 const benignMissCooldown = 7 * 24 * time.Hour
 
 // Worker consumes queued lyrics work one item at a time. The scan_results

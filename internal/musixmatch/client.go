@@ -37,6 +37,13 @@ var (
 	// this is a benign miss (see IsBenignMiss): there are no fetchable lyrics
 	// now and the upstream result is stable (it will not change on a near-term
 	// retry), so callers must not count it as a fetch failure for backoff.
+	//
+	// Restricted tracks (licensing) are also classified here. Such restrictions
+	// can be permanent, so a track wrapped as ErrNoLyrics may be re-checked on
+	// the fixed benign-miss cooldown indefinitely; Defer never increments the
+	// attempt count, so there is no natural ceiling. This is intentional:
+	// catalogs and licensing change over time, and the days-scale cadence keeps
+	// the cost negligible.
 	ErrNoLyrics = errors.New("musixmatch: no lyrics available")
 )
 
