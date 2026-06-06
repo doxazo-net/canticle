@@ -294,6 +294,10 @@ func Run(ctx context.Context, rawArgs []string, out io.Writer, deps Deps) int {
 			}
 			return 0
 		}
+		if err == arg.ErrVersion {
+			_, _ = fmt.Fprintln(out, VersionString())
+			return 0
+		}
 		if usageErr := parser.WriteUsageForSubcommand(out, parser.SubcommandNames()...); usageErr != nil {
 			_, _ = fmt.Fprintln(out, usageErr)
 			return 2
