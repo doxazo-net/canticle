@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
@@ -63,6 +64,13 @@ func IsBenignMiss(err error) bool {
 type Client struct {
 	Token      string
 	httpClient *http.Client
+
+	// pacer fields -- zero value means no pacing (minInterval == 0).
+	mu          sync.Mutex
+	minInterval time.Duration
+	lastRequest time.Time
+	now         func() time.Time
+	sleep       func(ctx context.Context, d time.Duration) bool
 }
 
 // NewClient creates a new Musixmatch API client.
@@ -70,7 +78,73 @@ func NewClient(token string) *Client {
 	return &Client{
 		Token:      token,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
+		now:        time.Now,
+		sleep:      ctxSleep,
 	}
+}
+
+// ctxSleep sleeps for d, returning true when the sleep completes and false when
+// ctx is canceled before d elapses.
+func ctxSleep(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// WithMinInterval sets the minimum duration between outbound API requests.
+// It returns c so callers can chain it on construction:
+//
+//	client := musixmatch.NewClient(token).WithMinInterval(15 * time.Second)
+//
+// A zero or negative value disables pacing (the default). This method is not
+// goroutine-safe; call it before sharing the client across goroutines.
+func (c *Client) WithMinInterval(d time.Duration) *Client {
+	c.minInterval = d
+	return c
+}
+
+// MinInterval returns the configured minimum request interval. A zero value
+// means pacing is disabled.
+func (c *Client) MinInterval() time.Duration {
+	return c.minInterval
+}
+
+// pace enforces the minimum request interval. It must be called at the top of
+// FindLyrics before the HTTP request is built. When minInterval is zero or
+// negative it returns immediately. Otherwise it reads the last request
+// timestamp under the mutex, waits for the remainder of the interval if
+// needed, then records the new timestamp.
+//
+// The wait is ctx-cancellable; if the context is canceled during the wait
+// pace returns ctx.Err() wrapped with context.
+func (c *Client) pace(ctx context.Context) error {
+	if c.minInterval <= 0 {
+		return nil
+	}
+
+	c.mu.Lock()
+	now := c.now()
+	elapsed := now.Sub(c.lastRequest)
+	wait := c.minInterval - elapsed
+	c.mu.Unlock()
+
+	if wait > 0 {
+		slog.Debug("musixmatch pacer: waiting before next request", "wait", wait)
+		if !c.sleep(ctx, wait) {
+			return fmt.Errorf("musixmatch: pace: %w", ctx.Err())
+		}
+	}
+
+	c.mu.Lock()
+	c.lastRequest = c.now()
+	c.mu.Unlock()
+
+	return nil
 }
 
 // Name returns the provider name.
@@ -80,6 +154,9 @@ func (c *Client) Name() string {
 
 // FindLyrics looks up lyrics for the given track from the Musixmatch API.
 func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Song, error) {
+	if err := c.pace(ctx); err != nil {
+		return models.Song{}, err
+	}
 	song := models.Song{}
 	baseURL, err := url.Parse(apiURL)
 	if err != nil {
