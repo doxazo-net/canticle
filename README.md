@@ -23,7 +23,7 @@ go install github.com/sydlexius/mxlrcgo-svc/cmd/mxlrcgo-svc@latest
 
 ## Usage
 ```text
-Usage: mxlrcgo-svc [fetch|serve|scan|library|keys|config]
+Usage: mxlrcgo-svc [fetch|serve|scan|library|keys|config|queue]
 
 Commands:
   fetch     fetch lyrics once without HTTP server or DB queue
@@ -32,10 +32,20 @@ Commands:
   library   manage library roots
   keys      manage API keys
   config    inspect or update configuration
+  queue     inspect or maintain the durable work queue
+
+Global flags:
+  --version  print the build version and exit
+  --help     show help for the program or a subcommand
 
 Legacy flag-only invocation is still supported:
   mxlrcgo-svc [--outdir OUTDIR] [--cooldown COOLDOWN] [--depth DEPTH] [--update] [--upgrade] [--bfs] [--serve] [--listen LISTEN] [--token TOKEN] [--config CONFIG] [SONG ...]
 ```
+
+`mxlrcgo-svc --version` prints the embedded build metadata, for example
+`mxlrcgo-svc v1.1.0 (commit 1a2b3c4, built 2026-06-05T00:00:00Z)`. Release
+binaries and the published Docker images carry the real tag; a `go build` or
+`go install` from source reports `dev` unless you inject the ldflags yourself.
 
 ## Example:
 ### One song
@@ -122,7 +132,7 @@ When verification is enabled, `ffmpeg` must be installed or `ffmpeg_path` must p
 
 ### Library and key management
 ```sh
-mxlrcgo-svc library add /music --name Music
+mxlrcgo-svc library add /data/media/music --name Music
 mxlrcgo-svc library list
 mxlrcgo-svc scan
 mxlrcgo-svc keys create --name lidarr --scope webhook
@@ -182,9 +192,38 @@ mxlrcgo-svc scan clear --library Music
 mxlrcgo-svc scan clear --library Music --yes
 ```
 
+### Environment variables
+
+All settings can come from a TOML config file, but for container deployments environment variables are usually easier. Precedence is **CLI flag > environment variable > config file > built-in default**. The table below is the complete env-var surface; the watcher and verification sections above give the operational detail.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `MUSIXMATCH_TOKEN` | (required) | Musixmatch API token. `MXLRC_API_TOKEN` is accepted as a lower-precedence alias. |
+| `MXLRC_WEBHOOK_API_KEY` | (none) | Comma-separated webhook API key(s) accepted by the server. Generate with `mxlrcgo-svc keys create --scope webhook`. |
+| `MXLRC_SERVER_ADDR` | `127.0.0.1:3876` | HTTP listen address for `serve`. Docker images default this to `0.0.0.0:50705`. |
+| `MXLRC_OUTPUT_DIR` | XDG / `/music` | Fallback output directory for webhook jobs that resolve via metadata. |
+| `MXLRC_DB_PATH` | XDG / `/config/mxlrcgo.db` | SQLite database path. |
+| `MXLRC_DOCKER` | `false` | When `true`, storage defaults resolve under `/config`. Set automatically in the images. |
+| `MXLRC_API_COOLDOWN` | `15` | Seconds between Musixmatch requests. `MXLRC_COOLDOWN` is a lower-precedence alias. |
+| `MXLRC_API_CIRCUIT_OPEN_DURATION` | `1800` | Seconds the worker circuit breaker stays open after a rate-limit signal (floor 300). |
+| `MXLRC_SCAN_INTERVAL` | `900` | `serve` library-scan interval in seconds. `0` scans once without repeating. |
+| `MXLRC_WORK_INTERVAL` | `0` | Worker poll interval in seconds. `0` falls back to `api.cooldown` (15s floor). |
+| `MXLRC_PROVIDER_PRIMARY` | `musixmatch` | Primary lyrics provider. |
+| `MXLRC_PROVIDERS_DISABLED` | (none) | Comma-separated providers to disable. |
+| `MXLRCGO_WATCH_ENABLED` | `false` | Enable the optional low-latency filesystem watcher (see above). |
+| `MXLRCGO_WATCH_DEBOUNCE_MS` | `2000` | Watcher debounce window in milliseconds. |
+| `MXLRCGO_WATCH_MAX_DIRS` | `100000` | Watcher safety cap on directories watched. |
+| `MXLRC_VERIFICATION_ENABLED` | `false` | Enable Whisper-based lyric verification (requires a sidecar and `ffmpeg`). |
+| `MXLRC_VERIFICATION_WHISPER_URL` | (none) | Whisper-compatible transcription endpoint. `MXLRC_WHISPER_URL` is an alias. |
+| `MXLRC_VERIFICATION_FFMPEG_PATH` | `ffmpeg` | Path to the `ffmpeg` binary used to extract audio samples. |
+| `MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS` | `30` | Audio sample length sent to Whisper. `MXLRC_VERIFICATION_SAMPLE_DURATION` is an alias. |
+| `MXLRC_VERIFICATION_MIN_CONFIDENCE` | `0.85` | Below this Musixmatch confidence, verify against Whisper (0-1). |
+| `MXLRC_VERIFICATION_MIN_SIMILARITY` | `0.35` | Minimum transcript/lyric overlap to accept (0-1). |
+| `PUID` / `PGID` | `99` / `100` | Container-only: user/group the process drops to for file ownership. |
+
 ## Docker
 
-The container runs the webhook service on port `50705` and stores its config and SQLite database under `/config`. Mount your music library at `/music`.
+The container runs the webhook service on port `50705` and stores its config and SQLite database under `/config`. Mount your media following the [TRaSH Guides](https://trash-guides.info/File-and-Folder-Structure/How-to-set-up/Unraid/) single-mount convention: map your data parent to `/data` and point the app at `/data/media/music`. (The image's built-in default is `/music`, which still works for the simplest single-folder case; just keep `MXLRC_OUTPUT_DIR` at its `/music` default and mount there instead.)
 
 Published GHCR tags:
 
@@ -204,8 +243,9 @@ docker run -d \
   -e MXLRC_WEBHOOK_API_KEY=mxlrc_your_webhook_key \
   -e PUID=99 \
   -e PGID=100 \
+  -e MXLRC_OUTPUT_DIR=/data/media/music \
   -v mxlrcgo-svc-config:/config \
-  -v /path/to/your/music:/music:rw \
+  -v /path/to/your/data:/data:rw \
   --restart unless-stopped \
   ghcr.io/sydlexius/mxlrcgo-svc:latest
 ```
@@ -222,7 +262,24 @@ To inspect or maintain the queue and scan state inside the container, exec the s
 
 ## Unraid
 
-An Unraid Community Applications template is provided at `unraid/mxlrcgo-svc.xml`. It follows the same template conventions as the `sydlexius/unraid-templates` repository: GHCR image, bridge networking, `/config` appdata, `/music` library mapping, and advanced `PUID`/`PGID` permission fields.
+An Unraid Community Applications template is provided at `unraid/mxlrcgo-svc.xml`. It follows the same template conventions as the `sydlexius/unraid-templates` repository: GHCR image, bridge networking, `/config` appdata, a music library mapping, and advanced `PUID`/`PGID` permission and tuning fields (scan/work intervals and the filesystem watcher).
+
+**Library mounts.** Prefer mapping the parent of your media into the container **once** and adding library roots beneath it, rather than a separate mount per library. This keeps container-visible paths stable and matches the single-mount convention used by the [TRaSH Guides Unraid layout](https://trash-guides.info/File-and-Folder-Structure/How-to-set-up/Unraid/), which maps `/mnt/user/data` to `/data` with media under `/data/media`:
+
+| Host path | Container path |
+|-----------|----------------|
+| `/mnt/user/data` | `/data` |
+
+Then register the library (or libraries) under it (paths are container-visible):
+
+```sh
+docker exec mxlrcgo-svc mxlrcgo-svc library add /data/media/music --name Music
+docker exec mxlrcgo-svc mxlrcgo-svc scan
+```
+
+(Unlike the *arr apps, mxlrcgo-svc never moves or hardlinks files; it only reads audio and writes a `.lrc`/`.txt` sibling. The single-mount convention is still worth following so paths match the rest of your stack.)
+
+If your music instead lives in several separate top-level shares, map their common parent once, or add one **Path** mapping per share beneath `/data/media` (for example `/mnt/user/<share>` to `/data/media/<share>`) and register each with `library add`. Lyrics are written next to each audio file, so libraries do not need a shared output root; set `MXLRC_OUTPUT_DIR` only for the webhook metadata-fallback case (step 3 under [Path resolution](#path-resolution-dockerunraid)).
 
 ## Development
 

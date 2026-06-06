@@ -22,6 +22,13 @@ builds:
         goarch: arm64
     ldflags:
       - -s -w
+      # Inject build metadata into internal/commands (overrides the "dev"
+      # defaults). GoReleaser only auto-injects these when ldflags is unset, so
+      # they are wired explicitly here. CommitDate (not Date) keeps the build
+      # reproducible, matching the -trimpath stance above.
+      - -X github.com/sydlexius/mxlrcgo-svc/internal/commands.version={{ .Version }}
+      - -X github.com/sydlexius/mxlrcgo-svc/internal/commands.commit={{ .Commit }}
+      - -X github.com/sydlexius/mxlrcgo-svc/internal/commands.date={{ .CommitDate }}
 
 archives:
   - id: default

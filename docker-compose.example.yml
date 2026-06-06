@@ -8,14 +8,14 @@ services:
     environment:
       MXLRC_DOCKER: "true"
       MXLRC_SERVER_ADDR: "0.0.0.0:50705"
-      MXLRC_OUTPUT_DIR: "/music"
+      MXLRC_OUTPUT_DIR: "/data/media/music"
       PUID: "99"
       PGID: "100"
       MUSIXMATCH_TOKEN: "${MUSIXMATCH_TOKEN}"
       MXLRC_WEBHOOK_API_KEY: "${MXLRC_WEBHOOK_API_KEY}"
     volumes:
       - mxlrcgo-svc-config:/config
-      - /path/to/your/music:/music:rw
+      - /path/to/your/data:/data:rw
 
 volumes:
   mxlrcgo-svc-config:
