@@ -309,7 +309,7 @@ func TestDBQueue_DequeueClaimsHighestPriorityReadyItem(t *testing.T) {
 func TestDBQueue_DequeueKeepsFIFOWithinSamePriority(t *testing.T) {
 	ctx := context.Background()
 	q := NewDBQueue(openQueueTestDB(t))
-	q.randomized = false
+	q.SetRandomized(false)
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	q.now = func() time.Time { return now }
 
@@ -389,7 +389,7 @@ func TestDBQueue_DequeueRandomizedReturnsExpectedSet(t *testing.T) {
 func TestDBQueue_DequeuePrioritizesWebhookAheadOfScanBacklog(t *testing.T) {
 	ctx := context.Background()
 	q := NewDBQueue(openQueueTestDB(t))
-	q.randomized = false
+	q.SetRandomized(false)
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	q.now = func() time.Time { return now }
 
