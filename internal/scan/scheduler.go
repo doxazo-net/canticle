@@ -3,6 +3,7 @@ package scan
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
@@ -131,6 +132,7 @@ func (s *Scheduler) scanAndPersist(ctx context.Context, lib models.Library, path
 // Run scans immediately and then repeats at Interval until ctx is canceled or
 // MaxRuntime elapses. If Interval is zero or negative, it performs one scan.
 func (s *Scheduler) Run(ctx context.Context) error {
+	slog.Info("scheduler started", "interval", s.Interval, "max_runtime", s.MaxRuntime)
 	if s.MaxRuntime > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, s.MaxRuntime)

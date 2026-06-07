@@ -16,3 +16,7 @@ ignore:
   # mirrors this exclusion via PATCH_COVERAGE_EXCLUDE so the local patch
   # coverage estimate and Codecov agree on scope.
   - "cmd/mxlrcgo-svc/main.go"
+  # Dev-only synthetic-library generator. Its logic lives in (and is tested via)
+  # internal/testutil.GenerateLibrary; main.go is just flag wiring and is not
+  # shipped (excluded from GoReleaser's build allowlist).
+  - "cmd/genlib/main.go"

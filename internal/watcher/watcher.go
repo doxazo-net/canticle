@@ -110,6 +110,7 @@ func (w *Watcher) translate(ctx context.Context, c <-chan notify.EventInfo, libs
 			if !ok {
 				continue
 			}
+			slog.Debug("watcher: event received", "event", ei.Event().String(), "path", ei.Path(), "library", lib.ID, "dir", dir)
 			select {
 			case <-ctx.Done():
 				return
@@ -165,6 +166,7 @@ func (w *Watcher) dispatch(ctx context.Context, events <-chan libEvent) {
 				continue
 			}
 			delete(timers, path)
+			slog.Debug("watcher: debounced scan triggered", "path", path, "library", p.lib.ID)
 			if err := w.scan(ctx, p.lib, path); err != nil {
 				slog.Warn("watcher scan failed", "path", path, "library", p.lib.ID, "error", err)
 			}

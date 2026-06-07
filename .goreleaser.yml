@@ -65,14 +65,17 @@ dockers_v2:
 signs:
   - artifacts: checksum
     cmd: cosign
+    # cosign v3 unified Sigstore bundle: a single ${artifact}.sigstore.json
+    # carries the signature, certificate, and Rekor entry (replaces the separate
+    # .sig/.pem from the v2 --output-signature/--output-certificate flags).
+    output: true
     args:
       - sign-blob
-      - --output-certificate=${certificate}
-      - --output-signature=${signature}
+      - --new-bundle-format
+      - --bundle=${signature}
       - ${artifact}
       - --yes
-    signature: ${artifact}.sig
-    certificate: ${artifact}.pem
+    signature: ${artifact}.sigstore.json
 
 docker_signs:
   - cmd: cosign

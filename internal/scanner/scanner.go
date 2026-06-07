@@ -30,6 +30,11 @@ type ScanOptions struct {
 	Upgrade  bool
 	MaxDepth int
 	BFS      bool
+	// EmbeddedLyrics controls handling of unsynced lyrics embedded in tags:
+	// "off" (default) ignores them; "respect" skips fetching a file that already
+	// carries embedded lyrics; "extract" writes them to a .txt sidecar (and then
+	// skips fetching). Synced (SYLT) tags are intentionally out of scope.
+	EmbeddedLyrics string
 }
 
 // NewScanner creates a new Scanner.
@@ -176,14 +181,77 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 			continue
 		}
 
+		// Embedded (unsynced) lyrics handling. After sidecar checks and metadata
+		// load: in "respect" mode, a file that already carries embedded lyrics is
+		// skipped (the user has lyrics); in "extract" mode, those lyrics are
+		// written to a .txt sidecar and the file is then skipped. SYLT (synced)
+		// is intentionally not handled. "off" (default) is a no-op.
+		if opts.EmbeddedLyrics != "" && opts.EmbeddedLyrics != "off" {
+			if embedded := strings.TrimSpace(m.Lyrics()); embedded != "" {
+				switch opts.EmbeddedLyrics {
+				case "extract":
+					if err := extractEmbeddedLyrics(dir, stem, m.Lyrics()); err != nil {
+						// Extraction failed: do NOT skip the track -- fall through
+						// and enqueue it so a normal fetch is still attempted
+						// (rather than silently dropping it from the pipeline).
+						slog.Warn("failed to extract embedded lyrics; enqueuing for fetch instead", "file", file.Name(), "error", err)
+					} else {
+						slog.Debug("extracted embedded lyrics to sidecar; skipping fetch", "file", file.Name())
+						continue
+					}
+				default: // "respect"
+					slog.Debug("respecting embedded lyrics; skipping fetch", "file", file.Name())
+					continue
+				}
+			}
+		}
+
 		slog.Debug("adding file", "file", file.Name())
 		*results = append(*results, models.ScanResult{
 			FilePath: filepath.Join(dir, file.Name()),
-			Track:    models.Track{ArtistName: m.Artist(), TrackName: m.Title()},
+			Track: models.Track{
+				ArtistName:  m.Artist(),
+				TrackName:   m.Title(),
+				AlbumName:   m.Album(),
+				AlbumArtist: m.AlbumArtist(),
+			},
 			Outdir:   dir,
 			Filename: stem + ".lrc",
 			Status:   "pending",
 		})
+	}
+	return nil
+}
+
+// extractEmbeddedLyrics writes embedded unsynced lyrics to a "<stem>.txt"
+// sidecar next to the audio file using exclusive-create semantics so an existing
+// sidecar is never overwritten. An already-present sidecar is treated as success.
+func extractEmbeddedLyrics(dir, stem, lyrics string) error {
+	path := filepath.Join(dir, stem+".txt")
+	// Write to a temp file in the same directory, then hard-link it into place.
+	// os.Link fails if the target already exists (atomic never-overwrite), and a
+	// partial or flush-failed write can never become the canonical sidecar
+	// because the temp file is always removed and only a fully written, closed
+	// file is linked. Close errors (where buffered-write failures surface) are
+	// returned rather than swallowed.
+	tmp, err := os.CreateTemp(dir, stem+".*.txt.tmp")
+	if err != nil {
+		return fmt.Errorf("scanner: create temp lyrics sidecar in %s: %w", dir, err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.WriteString(lyrics); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("scanner: write lyrics sidecar %s: %w", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("scanner: flush lyrics sidecar %s: %w", tmpName, err)
+	}
+	if err := os.Link(tmpName, path); err != nil {
+		if os.IsExist(err) {
+			return nil // a sidecar already exists; never overwrite it
+		}
+		return fmt.Errorf("scanner: link lyrics sidecar %s: %w", path, err)
 	}
 	return nil
 }

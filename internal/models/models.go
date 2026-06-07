@@ -5,6 +5,7 @@ type Track struct {
 	TrackName    string `json:"track_name,omitempty"`
 	ArtistName   string `json:"artist_name,omitempty"`
 	AlbumName    string `json:"album_name,omitempty"`
+	AlbumArtist  string `json:"album_artist,omitempty"`
 	TrackLength  int    `json:"track_length,omitempty"`
 	Instrumental int    `json:"instrumental,omitempty"`
 	HasLyrics    int    `json:"has_lyrics,omitempty"`
