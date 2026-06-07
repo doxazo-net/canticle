@@ -30,9 +30,13 @@ COPY build/docker/entrypoint.sh /entrypoint.sh
 # Make the entrypoint executable and pre-ship bash completion: generate the
 # static wrapper and source it from the system bashrc so interactive
 # `docker exec -it ... bash` sessions get tab-completion with no manual sourcing.
+# Alpine's bash compiles SYS_BASHRC=/etc/bash/bashrc (verified: that file is the
+# one an interactive non-login shell reads here). We also write the conventional
+# /etc/bash.bashrc for robustness if the base image ever changes; both are guarded.
 RUN chmod +x /entrypoint.sh && \
     mxlrcgo-svc completion bash > /etc/bash/mxlrcgo-svc.bash && \
-    printf '\n[ -f /etc/bash/mxlrcgo-svc.bash ] && . /etc/bash/mxlrcgo-svc.bash\n' >> /etc/bash/bashrc
+    printf '\n[ -f /etc/bash/mxlrcgo-svc.bash ] && . /etc/bash/mxlrcgo-svc.bash\n' \
+      | tee -a /etc/bash/bashrc /etc/bash.bashrc > /dev/null
 
 ENV MXLRC_DOCKER=true \
     MXLRC_SERVER_ADDR=0.0.0.0:50705
