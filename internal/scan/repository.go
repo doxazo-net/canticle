@@ -20,6 +20,10 @@ const (
 	StatusDone = "done"
 	// StatusFailed marks a discovered file whose lyrics work failed.
 	StatusFailed = "failed"
+	// StatusDeferred is not a stored scan_results status; it is a virtual filter
+	// for ListDeferred, selecting scan rows whose linked work_queue item is in
+	// benign-miss cooldown (those rows sit in 'processing' on the scan side).
+	StatusDeferred = "deferred"
 )
 
 // Repo provides persistence for library scan results.
@@ -54,11 +58,13 @@ const UpsertBatchSize = 500
 // already waits per attempt, so a handful of retries is ample.
 const upsertMaxAttempts = 5
 
-const baseUpsert = `INSERT INTO scan_results (library_id, file_path, artist, title, artist_key, title_key, outdir, filename, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+const baseUpsert = `INSERT INTO scan_results (library_id, file_path, artist, title, album, album_artist, artist_key, title_key, outdir, filename, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(library_id, file_path) DO UPDATE SET
                  artist = excluded.artist,
                  title = excluded.title,
+                 album = excluded.album,
+                 album_artist = excluded.album_artist,
                  artist_key = excluded.artist_key,
                  title_key = excluded.title_key,
                  outdir = excluded.outdir,
@@ -155,6 +161,8 @@ func upsertBatch(ctx context.Context, tx *sql.Tx, libraryID int64, results []mod
 			res.FilePath,
 			res.Track.ArtistName,
 			res.Track.TrackName,
+			res.Track.AlbumName,
+			res.Track.AlbumArtist,
 			normalize.NormalizeKey(res.Track.ArtistName),
 			normalize.NormalizeKey(res.Track.TrackName),
 			res.Outdir,
@@ -170,7 +178,7 @@ func upsertBatch(ctx context.Context, tx *sql.Tx, libraryID int64, results []mod
 // ListByLibrary returns persisted scan results for a library in stable ID order.
 func (r *Repo) ListByLibrary(ctx context.Context, libraryID int64) (results []models.ScanResult, retErr error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, library_id, file_path, artist, title, outdir, filename, status, created_at
+		`SELECT id, library_id, file_path, artist, title, album, album_artist, outdir, filename, status, created_at
          FROM scan_results
          WHERE library_id = ?
          ORDER BY id ASC`,
@@ -195,7 +203,7 @@ func (r *Repo) ListByLibrary(ctx context.Context, libraryID int64) (results []mo
 // ListPendingByLibrary returns pending scan results for a library in stable ID order.
 func (r *Repo) ListPendingByLibrary(ctx context.Context, libraryID int64) (results []models.ScanResult, retErr error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, library_id, file_path, artist, title, outdir, filename, status, created_at
+		`SELECT id, library_id, file_path, artist, title, album, album_artist, outdir, filename, status, created_at
          FROM scan_results
          WHERE library_id = ?
            AND status = ?
@@ -229,6 +237,8 @@ func scanResultRows(rows *sql.Rows) ([]models.ScanResult, error) {
 			&res.FilePath,
 			&res.Track.ArtistName,
 			&res.Track.TrackName,
+			&res.Track.AlbumName,
+			&res.Track.AlbumArtist,
 			&res.Outdir,
 			&res.Filename,
 			&res.Status,
@@ -259,7 +269,7 @@ type Filter struct {
 
 // List returns persisted scan results matching filter in stable ID order.
 func (r *Repo) List(ctx context.Context, filter Filter) (results []models.ScanResult, retErr error) {
-	const baseQuery = `SELECT id, library_id, file_path, artist, title, outdir, filename, status, created_at
+	const baseQuery = `SELECT id, library_id, file_path, artist, title, album, album_artist, outdir, filename, status, created_at
                        FROM scan_results`
 	const orderClause = ` ORDER BY id ASC`
 	var args []any
@@ -318,7 +328,7 @@ func (r *Repo) FindByTrack(ctx context.Context, artist, title string) (results [
 		return nil, nil
 	}
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, library_id, file_path, artist, title, outdir, filename, status, created_at
+		`SELECT id, library_id, file_path, artist, title, album, album_artist, outdir, filename, status, created_at
                        FROM scan_results
                        WHERE artist_key = ? AND title_key = ?
                        ORDER BY CASE status WHEN 'done' THEN 1 ELSE 0 END ASC, id ASC`,
@@ -336,6 +346,45 @@ func (r *Repo) FindByTrack(ctx context.Context, artist, title string) (results [
 	results, err = scanResultRows(rows)
 	if err != nil {
 		return nil, fmt.Errorf("scan: find by track rows: %w", err)
+	}
+	return results, nil
+}
+
+// ListDeferred returns scan_results whose linked work_queue row is in the
+// 'deferred' (benign-miss cooldown) state, optionally scoped by library and
+// capped by limit. Such rows sit in 'processing' on the scan side, so this join
+// through work_queue_scan_results is the only way to surface tracks that are
+// parked behind a miss cooldown rather than actively in flight.
+func (r *Repo) ListDeferred(ctx context.Context, filter Filter) (results []models.ScanResult, retErr error) {
+	query := `SELECT sr.id, sr.library_id, sr.file_path, sr.artist, sr.title, sr.album, sr.album_artist, sr.outdir, sr.filename, sr.status, sr.created_at
+              FROM scan_results sr
+              JOIN work_queue_scan_results j ON j.scan_result_id = sr.id
+              JOIN work_queue wq ON wq.id = j.work_queue_id
+              WHERE wq.status = 'deferred'`
+	var args []any
+	if filter.LibraryID != nil {
+		query += ` AND sr.library_id = ?`
+		args = append(args, *filter.LibraryID)
+	}
+	query += ` ORDER BY sr.id ASC`
+	if filter.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, filter.Limit)
+	}
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("scan: list deferred: %w", err)
+	}
+	defer func() {
+		if err := rows.Close(); err != nil && retErr == nil {
+			retErr = fmt.Errorf("scan: close deferred rows: %w", err)
+		}
+	}()
+
+	results, err = scanResultRows(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan: list deferred rows: %w", err)
 	}
 	return results, nil
 }

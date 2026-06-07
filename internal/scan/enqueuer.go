@@ -37,65 +37,70 @@ type Enqueuer struct {
 }
 
 // EnqueuePending reads pending scan results for libraryID, skips cache hits,
-// and enqueues cache misses for worker processing.
-func (e *Enqueuer) EnqueuePending(ctx context.Context, libraryID int64) error {
+// and enqueues cache misses for worker processing. It returns the number of
+// rows enqueued and the number short-circuited as cache hits so callers can log
+// a per-scan summary; on error the partial counts so far are returned alongside.
+func (e *Enqueuer) EnqueuePending(ctx context.Context, libraryID int64) (enqueued, cacheHits int, retErr error) {
 	if e.Results == nil {
-		return fmt.Errorf("scan: enqueuer results dependency is nil")
+		return 0, 0, fmt.Errorf("scan: enqueuer results dependency is nil")
 	}
 	if e.Cache == nil {
-		return fmt.Errorf("scan: enqueuer cache dependency is nil")
+		return 0, 0, fmt.Errorf("scan: enqueuer cache dependency is nil")
 	}
 	if e.Queue == nil {
-		return fmt.Errorf("scan: enqueuer queue dependency is nil")
+		return 0, 0, fmt.Errorf("scan: enqueuer queue dependency is nil")
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return 0, 0, err
 	}
 
 	results, err := e.Results.ListPendingByLibrary(ctx, libraryID)
 	if err != nil {
-		return fmt.Errorf("scan: list pending for enqueue: %w", err)
+		return 0, 0, fmt.Errorf("scan: list pending for enqueue: %w", err)
 	}
 
 	for _, res := range results {
 		if err := ctx.Err(); err != nil {
-			return err
+			return enqueued, cacheHits, err
 		}
 		_, err := e.Cache.LookupFallback(ctx, res.Track.ArtistName, res.Track.TrackName)
 		switch {
 		case err == nil:
 			if err := e.Results.SetStatus(ctx, []int64{res.ID}, StatusDone); err != nil {
-				return fmt.Errorf("scan: mark cache hit done %d: %w", res.ID, err)
+				return enqueued, cacheHits, fmt.Errorf("scan: mark cache hit done %d: %w", res.ID, err)
 			}
+			cacheHits++
 			continue
 		case errors.Is(err, sql.ErrNoRows):
 		default:
-			return fmt.Errorf("scan: cache lookup %d: %w", res.ID, err)
+			return enqueued, cacheHits, fmt.Errorf("scan: cache lookup %d: %w", res.ID, err)
 		}
 
 		if err := e.Results.SetStatus(ctx, []int64{res.ID}, StatusProcessing); err != nil {
-			return fmt.Errorf("scan: reserve result %d: %w", res.ID, err)
+			return enqueued, cacheHits, fmt.Errorf("scan: reserve result %d: %w", res.ID, err)
 		}
 		inputs, err := scanInputs(res)
 		if err != nil {
 			if restoreErr := e.Results.SetStatus(ctx, []int64{res.ID}, StatusPending); restoreErr != nil {
-				return fmt.Errorf("scan: build inputs for result %d: %w; restore pending: %w", res.ID, err, restoreErr)
+				return enqueued, cacheHits, fmt.Errorf("scan: build inputs for result %d: %w; restore pending: %w", res.ID, err, restoreErr)
 			}
-			return fmt.Errorf("scan: build inputs for result %d: %w", res.ID, err)
+			return enqueued, cacheHits, fmt.Errorf("scan: build inputs for result %d: %w", res.ID, err)
 		}
 		if _, err := e.Queue.Enqueue(ctx, inputs, e.Priority); err != nil {
 			if restoreErr := e.Results.SetStatus(ctx, []int64{res.ID}, StatusPending); restoreErr != nil {
-				return fmt.Errorf("scan: enqueue result %d: %w; restore pending: %w", res.ID, err, restoreErr)
+				return enqueued, cacheHits, fmt.Errorf("scan: enqueue result %d: %w; restore pending: %w", res.ID, err, restoreErr)
 			}
-			return fmt.Errorf("scan: enqueue result %d: %w", res.ID, err)
+			return enqueued, cacheHits, fmt.Errorf("scan: enqueue result %d: %w", res.ID, err)
 		}
+		enqueued++
 	}
-	return nil
+	return enqueued, cacheHits, nil
 }
 
 // OnScanComplete adapts EnqueuePending to Scheduler.OnScanComplete.
 func (e *Enqueuer) OnScanComplete(ctx context.Context, lib models.Library, _ []models.ScanResult) error {
-	return e.EnqueuePending(ctx, lib.ID)
+	_, _, err := e.EnqueuePending(ctx, lib.ID)
+	return err
 }
 
 // ResultInputs converts a scan result into queue inputs using the same outdir,

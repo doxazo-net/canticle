@@ -61,15 +61,21 @@ type Worker struct {
 	verifier              verification.Verifier
 	verifyBelowConfidence float64
 	consecutiveFailures   int
-	baseBackoff           time.Duration
-	maxBackoff            time.Duration
-	sleep                 func(context.Context, time.Duration)
-	now                   func() time.Time
-	circuitOpenDuration   time.Duration
-	circuitOpenUntil      time.Time
-	missBackoffBase       time.Duration
-	missBackoffCap        time.Duration
-	maxMissAttempts       int
+	// last* record the most recent hard failure so the backoff WARN can name the
+	// track it is throttling on (the failure cause is logged separately, but the
+	// periodic backoff line otherwise carried no identity).
+	lastFailID          int64
+	lastFailArtist      string
+	lastFailTrack       string
+	baseBackoff         time.Duration
+	maxBackoff          time.Duration
+	sleep               func(context.Context, time.Duration)
+	now                 func() time.Time
+	circuitOpenDuration time.Duration
+	circuitOpenUntil    time.Time
+	missBackoffBase     time.Duration
+	missBackoffCap      time.Duration
+	maxMissAttempts     int
 }
 
 var errQueueEmpty = errors.New("worker queue empty")
@@ -176,7 +182,9 @@ func (w *Worker) run(ctx context.Context, pause func(context.Context) error) err
 	for {
 		if w.consecutiveFailures > 0 {
 			delay := backoff.Geometric(w.consecutiveFailures, w.baseBackoff, w.maxBackoff)
-			slog.Warn("worker backing off after consecutive failures", "attempts", w.consecutiveFailures, "delay", delay)
+			slog.Warn("worker backing off after consecutive failures",
+				"attempts", w.consecutiveFailures, "delay", delay,
+				"last_fail_id", w.lastFailID, "last_fail_artist", w.lastFailArtist, "last_fail_track", w.lastFailTrack)
 			w.sleep(ctx, delay)
 			if ctx.Err() != nil {
 				return nil
@@ -184,6 +192,7 @@ func (w *Worker) run(ctx context.Context, pause func(context.Context) error) err
 		}
 		if err := w.RunOnce(ctx); err != nil {
 			if errors.Is(err, errQueueEmpty) {
+				slog.Debug("worker poll: queue empty")
 				return nil
 			}
 			if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
@@ -232,7 +241,14 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		return fmt.Errorf("worker: dequeue: %w", err)
 	}
 
-	song, cacheHit, err := w.song(ctx, item.Inputs.Track)
+	// Resolve the matching artist once (album-artist preferred over a possibly
+	// multi-valued track artist) and use the SAME resolved track for the cache
+	// lookup, the provider query, and the cache store, so the read and write
+	// cache keys always agree. Confidence still scores against the original tag.
+	resolvedTrack := item.Inputs.Track
+	resolvedTrack.ArtistName = normalize.ResolveArtist(item.Inputs.Track.AlbumArtist, item.Inputs.Track.ArtistName)
+
+	song, cacheHit, err := w.song(ctx, resolvedTrack)
 	if err != nil {
 		if tripped, releaseErr := w.tripCircuitIfRateLimited(ctx, item, err); tripped {
 			if releaseErr != nil {
@@ -243,9 +259,12 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		// A no-result (no matching track, or a match with no usable lyrics) is
 		// not our failure and does NOT retire the queue row: the catalog grows
 		// and more sources may be added, so requeue it after a generous fixed
-		// cooldown but do NOT ratchet the consecutive-failure counter (which
-		// would otherwise spam geometric backoff on routine library scans).
+		// cooldown. A benign miss also means the provider round-trip SUCCEEDED,
+		// so reset the consecutive-failure counter: an earlier transient failure
+		// must not pin the worker in a permanent geometric backoff while it is
+		// otherwise healthily reaching the provider and getting clean misses.
 		if musixmatch.IsBenignMiss(err) {
+			w.consecutiveFailures = 0
 			slog.Info("worker no lyrics match; requeuing deferred", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "reason", err)
 			return w.requeueDeferred(ctx, item, err)
 		}
@@ -259,7 +278,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			slog.Warn("worker verification failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "confidence", confidence, "error", err)
 			return w.fail(ctx, item, err)
 		}
-		if err := w.store(ctx, item.Inputs.Track, song); err != nil {
+		if err := w.store(ctx, resolvedTrack, song); err != nil {
 			slog.Warn("worker cache store failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", err)
 			return w.fail(ctx, item, err)
 		}
@@ -301,6 +320,9 @@ func (w *Worker) verify(ctx context.Context, item queue.WorkItem, song models.So
 	return nil
 }
 
+// song looks up or fetches lyrics for track. The caller is responsible for
+// resolving the matching artist (see RunOnce); song uses track verbatim for both
+// the cache lookup and the provider query so the cache read/write keys agree.
 func (w *Worker) song(ctx context.Context, track models.Track) (models.Song, bool, error) {
 	cached, err := w.cache.LookupExact(ctx, track.ArtistName, track.TrackName, track.AlbumName)
 	if err == nil {
@@ -358,6 +380,9 @@ func (w *Worker) tripCircuitIfRateLimited(ctx context.Context, item queue.WorkIt
 
 func (w *Worker) fail(ctx context.Context, item queue.WorkItem, cause error) error {
 	w.consecutiveFailures++
+	w.lastFailID = item.ID
+	w.lastFailArtist = item.Inputs.Track.ArtistName
+	w.lastFailTrack = item.Inputs.Track.TrackName
 	if _, err := w.queue.Fail(context.WithoutCancel(ctx), item.ID, cause); err != nil {
 		return fmt.Errorf("worker: fail item %d after %v: %w", item.ID, cause, err)
 	}

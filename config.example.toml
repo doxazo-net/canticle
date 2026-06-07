@@ -46,6 +46,15 @@ circuit_open_duration = 1800
 # Default output directory for .lrc files.
 dir = "lyrics"
 
+# Embedded (unsynced) lyrics handling (env: MXLRC_EMBEDDED_LYRICS; CLI:
+# --embedded-lyrics). One of:
+#   off     - ignore embedded lyrics (default)
+#   respect - skip fetching for files that already carry embedded lyrics
+#   extract - write embedded lyrics to a .txt sidecar (never overwriting an
+#             existing one), then skip fetching
+# Synced (SYLT) tags are intentionally not handled.
+# embedded_lyrics = "off"
+
 [db]
 # Path to SQLite database file.
 # Default: ~/.local/share/mxlrcgo-svc/mxlrcgo.db
@@ -62,6 +71,15 @@ addr = "127.0.0.1:3876"
 # Scheduler scan interval in seconds for `serve` mode (env: MXLRC_SCAN_INTERVAL).
 # Default 900. Set to 0 to scan once and not repeat. The --scan-interval flag
 # overrides this value.
+#
+# Watcher-primary mode: with the filesystem watcher enabled
+# (MXLRCGO_WATCH_ENABLED=1), a long backstop such as 21600 (6h) is appropriate
+# since the watcher handles latency and the startup scan always runs. Do NOT use
+# 0 unless you have verified the watcher delivers events on your filesystem
+# (e.g. Unraid /mnt/user FUSE mounts often do not). See the README watcher
+# section. Related watcher env vars: MXLRCGO_WATCH_ENABLED,
+# MXLRCGO_WATCH_DEBOUNCE_MS, MXLRCGO_WATCH_MAX_DIRS. Debug visibility:
+# MXLRC_LOG_LEVEL=debug.
 # scan_interval_seconds = 900
 
 # Worker poll interval in seconds for `serve` mode (env: MXLRC_WORK_INTERVAL).

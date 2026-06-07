@@ -72,6 +72,11 @@ const missBackoffBaseMin = 1
 // OutputConfig holds output-related configuration.
 type OutputConfig struct {
 	Dir string `toml:"dir"`
+	// EmbeddedLyrics controls handling of unsynced lyrics embedded in audio tags:
+	// "off" (default), "respect" (skip files that already carry embedded lyrics),
+	// or "extract" (write them to a .txt sidecar, then skip). env:
+	// MXLRC_EMBEDDED_LYRICS; CLI: --embedded-lyrics.
+	EmbeddedLyrics string `toml:"embedded_lyrics"`
 }
 
 // DBConfig holds database configuration.
@@ -121,7 +126,7 @@ func defaults() Config {
 			MissBackoffCapHours:  missBackoffCapDefault,
 			MaxMissAttempts:      15,
 		},
-		Output:       OutputConfig{Dir: "lyrics"},
+		Output:       OutputConfig{Dir: "lyrics", EmbeddedLyrics: "off"},
 		DB:           DBConfig{Path: xdgDataPath("mxlrcgo-svc", "mxlrcgo.db")},
 		Server:       ServerConfig{Addr: "127.0.0.1:3876", ScanIntervalSeconds: defaultScanIntervalSeconds},
 		Providers:    ProvidersConfig{Primary: "musixmatch"},
@@ -153,6 +158,9 @@ func Load(path string) (Config, error) {
 			}
 			if cfg.Output.Dir == "" {
 				cfg.Output.Dir = d.Output.Dir
+			}
+			if cfg.Output.EmbeddedLyrics == "" {
+				cfg.Output.EmbeddedLyrics = d.Output.EmbeddedLyrics
 			}
 			if cfg.Server.Addr == "" {
 				cfg.Server.Addr = d.Server.Addr
@@ -201,6 +209,7 @@ func Load(path string) (Config, error) {
 		}
 	}
 	applyEnvOverrides(&cfg)
+	normalizeEmbeddedLyrics(&cfg)
 	clampCircuitOpenDuration(&cfg)
 	clampMissBackoff(&cfg)
 	if cfg.DB.Path == "" {
@@ -273,6 +282,9 @@ func applyEnvOverrides(cfg *Config) {
 
 	if v := os.Getenv("MXLRC_OUTPUT_DIR"); v != "" {
 		cfg.Output.Dir = v
+	}
+	if v := os.Getenv("MXLRC_EMBEDDED_LYRICS"); v != "" {
+		cfg.Output.EmbeddedLyrics = v
 	}
 	if v := os.Getenv("MXLRC_DB_PATH"); v != "" {
 		cfg.DB.Path = v
@@ -354,6 +366,22 @@ func applyEnvOverrides(cfg *Config) {
 		} else {
 			cfg.Verification.MinSimilarity = n
 		}
+	}
+}
+
+// normalizeEmbeddedLyrics lowercases the embedded-lyrics mode and clamps any
+// unrecognized value to "off" with a warning, so a typo can never silently
+// enable extraction or skip fetching.
+func normalizeEmbeddedLyrics(cfg *Config) {
+	v := strings.ToLower(strings.TrimSpace(cfg.Output.EmbeddedLyrics))
+	switch v {
+	case "off", "respect", "extract":
+		cfg.Output.EmbeddedLyrics = v
+	case "":
+		cfg.Output.EmbeddedLyrics = "off"
+	default:
+		slog.Warn("invalid embedded_lyrics value; using off", "value", cfg.Output.EmbeddedLyrics) //nolint:gosec // G706: tainted config value passed as a structured slog field, not a format string
+		cfg.Output.EmbeddedLyrics = "off"
 	}
 }
 

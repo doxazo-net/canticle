@@ -40,13 +40,14 @@ import (
 
 // Args defines the CLI arguments for the application.
 type Args struct {
-	Fetch   *FetchCmd   `arg:"subcommand:fetch" help:"fetch lyrics once without HTTP server or DB queue"`
-	Serve   *ServeCmd   `arg:"subcommand:serve" help:"run HTTP server, worker, and library scheduler"`
-	Scan    *ScanCmd    `arg:"subcommand:scan" help:"scan configured libraries and enqueue missing lyrics"`
-	Library *LibraryCmd `arg:"subcommand:library" help:"manage library roots"`
-	Keys    *KeysCmd    `arg:"subcommand:keys" help:"manage API keys"`
-	Config  *ConfigCmd  `arg:"subcommand:config" help:"inspect or update configuration"`
-	Queue   *QueueCmd   `arg:"subcommand:queue" help:"inspect or maintain the durable work queue"`
+	Fetch      *FetchCmd      `arg:"subcommand:fetch" help:"fetch lyrics once without HTTP server or DB queue"`
+	Serve      *ServeCmd      `arg:"subcommand:serve" help:"run HTTP server, worker, and library scheduler"`
+	Scan       *ScanCmd       `arg:"subcommand:scan" help:"scan configured libraries and enqueue missing lyrics"`
+	Library    *LibraryCmd    `arg:"subcommand:library" help:"manage library roots"`
+	Keys       *KeysCmd       `arg:"subcommand:keys" help:"manage API keys"`
+	Config     *ConfigCmd     `arg:"subcommand:config" help:"inspect or update configuration"`
+	Queue      *QueueCmd      `arg:"subcommand:queue" help:"inspect or maintain the durable work queue"`
+	Completion *CompletionCmd `arg:"subcommand:completion" help:"output a shell completion script (bash, zsh, or fish)"`
 }
 
 // LegacyArgs preserves the pre-subcommand CLI surface.
@@ -75,32 +76,36 @@ type FetchCmd struct {
 	BFS        bool     `arg:"--bfs" help:"(directory mode) use breadth-first-search traversal"`
 	Token      string   `arg:"-t,--token" help:"musixmatch token" default:""`
 	ConfigPath string   `arg:"--config" help:"path to config file (default: XDG)" default:""`
+	Album      string   `arg:"--album" help:"album name passed to the matcher (also a hint for --probe)" default:""`
+	Probe      bool     `arg:"--probe" help:"query the provider once for the first [artist,title] and print the matched result without writing files (diagnostic for matcher behavior)"`
 }
 
 // ServeCmd runs the daemon.
 type ServeCmd struct {
-	Listen       *string `arg:"--listen" help:"HTTP listen address (default: from config or 127.0.0.1:3876)"`
-	Outdir       *string `arg:"-o,--outdir" help:"output directory (default: from config or 'lyrics')"`
-	Token        string  `arg:"-t,--token" help:"musixmatch token" default:""`
-	ConfigPath   string  `arg:"--config" help:"path to config file (default: XDG)" default:""`
-	Depth        int     `arg:"-d,--depth" help:"scheduler maximum recursion depth" default:"100"`
-	Update       bool    `arg:"-u,--update" help:"scheduler re-fetches existing .lrc files"`
-	Upgrade      bool    `arg:"--upgrade" help:"scheduler re-fetches .txt lyrics to promote them"`
-	BFS          bool    `arg:"--bfs" help:"scheduler uses breadth-first traversal"`
-	ScanInterval *int    `arg:"--scan-interval" help:"scheduler interval in seconds (default: server.scan_interval_seconds or 900; 0 disables repeat)"`
-	WorkInterval *int    `arg:"--work-interval" help:"worker poll interval in seconds (default: server.work_interval_seconds or api.cooldown; minimum 15)"`
+	Listen         *string `arg:"--listen" help:"HTTP listen address (default: from config or 127.0.0.1:3876)"`
+	Outdir         *string `arg:"-o,--outdir" help:"output directory (default: from config or 'lyrics')"`
+	Token          string  `arg:"-t,--token" help:"musixmatch token" default:""`
+	ConfigPath     string  `arg:"--config" help:"path to config file (default: XDG)" default:""`
+	Depth          int     `arg:"-d,--depth" help:"scheduler maximum recursion depth" default:"100"`
+	Update         bool    `arg:"-u,--update" help:"scheduler re-fetches existing .lrc files"`
+	Upgrade        bool    `arg:"--upgrade" help:"scheduler re-fetches .txt lyrics to promote them"`
+	BFS            bool    `arg:"--bfs" help:"scheduler uses breadth-first traversal"`
+	EmbeddedLyrics *string `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off)"`
+	ScanInterval   *int    `arg:"--scan-interval" help:"scheduler interval in seconds (default: server.scan_interval_seconds or 900; 0 disables repeat)"`
+	WorkInterval   *int    `arg:"--work-interval" help:"worker poll interval in seconds (default: server.work_interval_seconds or api.cooldown; minimum 15)"`
 }
 
 // ScanCmd scans libraries once and enqueues cache misses. It also hosts
 // nested inspection subcommands (results, clear). When neither nested
 // subcommand is set, the legacy run-once scan path is taken.
 type ScanCmd struct {
-	ConfigPath string   `arg:"--config" help:"path to config file (default: XDG)" default:""`
-	Depth      int      `arg:"-d,--depth" help:"maximum recursion depth" default:"100"`
-	Update     bool     `arg:"-u,--update" help:"re-fetch and overwrite existing .lrc files"`
-	Upgrade    bool     `arg:"--upgrade" help:"re-fetch .txt lyrics to promote them"`
-	BFS        bool     `arg:"--bfs" help:"use breadth-first traversal"`
-	Libraries  []string `arg:"--only,separate" help:"limit scan to named or numeric libraries; repeat to select more than one. Distinct from subcommand --library flags (which target a single library row)"`
+	ConfigPath     string   `arg:"--config" help:"path to config file (default: XDG)" default:""`
+	Depth          int      `arg:"-d,--depth" help:"maximum recursion depth" default:"100"`
+	Update         bool     `arg:"-u,--update" help:"re-fetch and overwrite existing .lrc files"`
+	Upgrade        bool     `arg:"--upgrade" help:"re-fetch .txt lyrics to promote them"`
+	BFS            bool     `arg:"--bfs" help:"use breadth-first traversal"`
+	EmbeddedLyrics *string  `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off)"`
+	Libraries      []string `arg:"--only,separate" help:"limit scan to named or numeric libraries; repeat to select more than one. Distinct from subcommand --library flags (which target a single library row)"`
 
 	Results *ScanResultsCmd `arg:"subcommand:results" help:"list persisted scan_results rows"`
 	Clear   *ScanClearCmd   `arg:"subcommand:clear" help:"delete persisted scan_results rows for a library"`
@@ -281,6 +286,11 @@ func Run(ctx context.Context, rawArgs []string, out io.Writer, deps Deps) int {
 	if out == nil {
 		out = os.Stdout
 	}
+	// __complete is the hidden handler the generated completion scripts invoke.
+	// It is intercepted before flag parsing so it never appears in help output.
+	if len(rawArgs) > 0 && rawArgs[0] == "__complete" {
+		return runComplete(ctx, out, rawArgs[1:])
+	}
 	if deps.LoadDotenv == nil {
 		deps.LoadDotenv = func() error { return nil }
 	}
@@ -328,6 +338,7 @@ func Run(ctx context.Context, rawArgs []string, out io.Writer, deps Deps) int {
 	}
 
 	_ = deps.LoadDotenv()
+	applyLogLevel()
 
 	switch {
 	case !usesSubcommand(rawArgs):
@@ -349,6 +360,8 @@ func Run(ctx context.Context, rawArgs []string, out io.Writer, deps Deps) int {
 		return runConfig(out, *args.Config)
 	case args.Queue != nil:
 		return runQueueCmd(ctx, out, *args.Queue)
+	case args.Completion != nil:
+		return runCompletion(out, *args.Completion)
 	default:
 		_, _ = fmt.Fprintln(out, "missing subcommand")
 		return 2
@@ -363,7 +376,7 @@ func usesSubcommand(rawArgs []string) bool {
 		return true
 	}
 	commands := map[string]bool{
-		"fetch": true, "serve": true, "scan": true, "library": true, "keys": true, "config": true, "queue": true,
+		"fetch": true, "serve": true, "scan": true, "library": true, "keys": true, "config": true, "queue": true, "completion": true,
 	}
 	return commands[rawArgs[0]]
 }
@@ -392,6 +405,23 @@ func legacyServe(args LegacyArgs) ServeCmd {
 		Update:     args.Update,
 		Upgrade:    args.Upgrade,
 		BFS:        args.BFS,
+	}
+}
+
+// applyLogLevel adjusts the default slog level from MXLRC_LOG_LEVEL (debug,
+// info, warn, error). It uses SetLogLoggerLevel so the existing default-handler
+// output format is unchanged; only the threshold moves. Unset/unknown leaves the
+// default (info). DEBUG exposes the worker idle-poll and watcher event lines.
+func applyLogLevel() {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("MXLRC_LOG_LEVEL"))) {
+	case "debug":
+		slog.SetLogLoggerLevel(slog.LevelDebug)
+	case "warn", "warning":
+		slog.SetLogLoggerLevel(slog.LevelWarn)
+	case "error":
+		slog.SetLogLoggerLevel(slog.LevelError)
+	case "info", "":
+		slog.SetLogLoggerLevel(slog.LevelInfo)
 	}
 }
 
@@ -427,6 +457,15 @@ func runFetch(ctx context.Context, out io.Writer, args FetchCmd, newFetcher func
 		return 1
 	}
 
+	if args.Probe {
+		artist, title := parseArtistTitle(args.Song[0])
+		return fetchProbe(ctx, out, models.Track{
+			ArtistName: artist,
+			TrackName:  title,
+			AlbumName:  args.Album,
+		}, fetcher)
+	}
+
 	inputs := queue.NewInputsQueue()
 	sc := scanner.NewScanner()
 	mode, err := sc.ParseInput(args.Song, outdir, args.Update, args.Upgrade, args.Depth, args.BFS, inputs)
@@ -448,6 +487,68 @@ func runFetch(ctx context.Context, out io.Writer, args FetchCmd, newFetcher func
 		return 1
 	}
 	return 0
+}
+
+// fetchProbe runs a single live query against the fetcher and prints the matched
+// result without writing any files. It is a diagnostic for the (undocumented)
+// Musixmatch macro matcher: it shows what artist/title/album the query resolved
+// to and what lyrics came back, so matcher behavior (album-artist vs a
+// concatenated multi-artist string, album steering between lyric versions) can be
+// characterized from a local build. A no-match is a valid outcome, not an error,
+// so it returns 0.
+func fetchProbe(ctx context.Context, out io.Writer, track models.Track, fetcher musixmatch.Fetcher) int {
+	_, _ = fmt.Fprintf(out, "query:   artist=%q title=%q album=%q\n", track.ArtistName, track.TrackName, track.AlbumName)
+	song, err := fetcher.FindLyrics(ctx, track)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "result:  MISS (%v)\n", err)
+		return 0
+	}
+	_, _ = fmt.Fprintf(out, "matched: artist=%q title=%q album=%q\n",
+		song.Track.ArtistName, song.Track.TrackName, song.Track.AlbumName)
+	_, _ = fmt.Fprintf(out, "lyrics:  synced_lines=%d unsynced=%t instrumental=%t\n",
+		len(song.Subtitles.Lines),
+		strings.TrimSpace(song.Lyrics.LyricsBody) != "",
+		song.Track.Instrumental == 1)
+	if preview := lyricPreview(song, 5); preview != "" {
+		_, _ = fmt.Fprintf(out, "preview:\n%s\n", preview)
+	}
+	return 0
+}
+
+// parseArtistTitle splits a single "artist,title" probe argument. Extra commas
+// fold into the title, so "a,b,c" yields artist "a" and title "b,c".
+func parseArtistTitle(s string) (artist, title string) {
+	parts := strings.SplitN(s, ",", 2)
+	artist = strings.TrimSpace(parts[0])
+	if len(parts) > 1 {
+		title = strings.TrimSpace(parts[1])
+	}
+	return artist, title
+}
+
+// lyricPreview returns up to n non-blank lines of the matched lyrics, preferring
+// synced subtitle text and falling back to the unsynced body.
+func lyricPreview(song models.Song, n int) string {
+	var lines []string
+	for _, l := range song.Subtitles.Lines {
+		if t := strings.TrimSpace(l.Text); t != "" {
+			lines = append(lines, t)
+		}
+		if len(lines) >= n {
+			break
+		}
+	}
+	if len(lines) == 0 {
+		for _, l := range strings.Split(song.Lyrics.LyricsBody, "\n") {
+			if t := strings.TrimSpace(l); t != "" {
+				lines = append(lines, t)
+			}
+			if len(lines) >= n {
+				break
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixmatch.Fetcher, newWriter func(roots ...string) lyrics.Writer) int {
@@ -519,7 +620,7 @@ func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixm
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runWatcher(runCtx, sqlDB, args, watchCfg)
+			runWatcher(runCtx, sqlDB, args, watchCfg, cfg)
 		}()
 	}
 
@@ -564,6 +665,7 @@ func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixm
 
 func runWorkerLoop(ctx context.Context, w *worker.Worker, interval time.Duration) {
 	interval = normalizeWorkerInterval(interval)
+	slog.Info("worker loop started", "interval", interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -646,10 +748,11 @@ func configureWorkerVerification(w *worker.Worker, cfg config.Config, verifier v
 
 func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args ServeCmd) {
 	s := scheduler(sqlDB, scanner.ScanOptions{
-		Update:   args.Update,
-		Upgrade:  args.Upgrade,
-		MaxDepth: args.Depth,
-		BFS:      args.BFS,
+		Update:         args.Update,
+		Upgrade:        args.Upgrade,
+		MaxDepth:       args.Depth,
+		BFS:            args.BFS,
+		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
 	})
 	s.Interval = serveScanInterval(cfg, args)
 	if err := s.Run(ctx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
@@ -660,14 +763,15 @@ func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args Se
 // runWatcher runs the optional filesystem watcher, triggering a targeted scan of
 // the changed directory under the owning library. The periodic scheduler remains
 // the reconciliation backstop; the watcher only lowers latency for new files.
-func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, cfg watcher.Config) {
+func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watcher.Config, cfg config.Config) {
 	sched := scheduler(sqlDB, scanner.ScanOptions{
-		Update:   args.Update,
-		Upgrade:  args.Upgrade,
-		MaxDepth: args.Depth,
-		BFS:      args.BFS,
+		Update:         args.Update,
+		Upgrade:        args.Upgrade,
+		MaxDepth:       args.Depth,
+		BFS:            args.BFS,
+		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
 	})
-	wch := watcher.New(cfg, library.New(sqlDB), func(ctx context.Context, lib models.Library, path string) error {
+	wch := watcher.New(watchCfg, library.New(sqlDB), func(ctx context.Context, lib models.Library, path string) error {
 		return sched.RunOnceForPath(ctx, lib, path)
 	})
 	// The watcher is best-effort and explicitly never a replacement for the
@@ -735,10 +839,11 @@ func runScan(ctx context.Context, out io.Writer, args ScanCmd) int {
 	defer sqlDB.Close() //nolint:errcheck // best-effort close on shutdown
 
 	s := scheduler(sqlDB, scanner.ScanOptions{
-		Update:   args.Update,
-		Upgrade:  args.Upgrade,
-		MaxDepth: args.Depth,
-		BFS:      args.BFS,
+		Update:         args.Update,
+		Upgrade:        args.Upgrade,
+		MaxDepth:       args.Depth,
+		BFS:            args.BFS,
+		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
 	})
 	if len(args.Libraries) > 0 {
 		libRepo := library.New(sqlDB)
@@ -768,6 +873,24 @@ func runScan(ctx context.Context, out io.Writer, args ScanCmd) int {
 	return 0
 }
 
+// embeddedLyricsMode resolves the embedded-lyrics mode: the CLI flag wins over
+// the (already-normalized) config value, and any unrecognized value clamps to
+// "off" so a typo can never silently enable extraction or skip fetching.
+func embeddedLyricsMode(flag *string, cfgVal string) string {
+	v := cfgVal
+	if flag != nil {
+		v = *flag
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "respect":
+		return "respect"
+	case "extract":
+		return "extract"
+	default:
+		return "off"
+	}
+}
+
 func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions) scan.Scheduler {
 	results := scan.New(sqlDB)
 	enq := scan.Enqueuer{
@@ -781,8 +904,17 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions) scan.Scheduler {
 		Results:   results,
 		Scanner:   scanner.NewScanner(),
 		Options:   opts,
-		OnScanComplete: func(ctx context.Context, lib models.Library, _ []models.ScanResult) error {
-			return enq.EnqueuePending(ctx, lib.ID)
+		OnScanComplete: func(ctx context.Context, lib models.Library, found []models.ScanResult) error {
+			enqueued, cacheHits, err := enq.EnqueuePending(ctx, lib.ID)
+			if err != nil {
+				// Counts are partial on an aborted enqueue; don't log "complete".
+				slog.Warn("scheduled scan incomplete (enqueue aborted)",
+					"library", lib.Name, "found", len(found), "enqueued", enqueued, "cache_hits", cacheHits, "error", err)
+				return err
+			}
+			slog.Info("scheduled scan complete",
+				"library", lib.Name, "found", len(found), "enqueued", enqueued, "cache_hits", cacheHits)
+			return nil
 		},
 	}
 }
@@ -1065,6 +1197,7 @@ func configKeys() []string {
 		"api.miss_backoff_cap_hours",
 		"api.max_miss_attempts",
 		"output.dir",
+		"output.embedded_lyrics",
 		"db.path",
 		"server.addr",
 		"server.webhook_api_keys",
@@ -1097,6 +1230,8 @@ func configValue(cfg config.Config, key string) (string, bool) {
 		return strconv.Itoa(cfg.API.MaxMissAttempts), true
 	case "output.dir":
 		return cfg.Output.Dir, true
+	case "output.embedded_lyrics":
+		return cfg.Output.EmbeddedLyrics, true
 	case "db.path":
 		return cfg.DB.Path, true
 	case "server.addr":
@@ -1164,6 +1299,13 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 		cfg.API.MaxMissAttempts = n
 	case "output.dir":
 		cfg.Output.Dir = value
+	case "output.embedded_lyrics":
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "off", "respect", "extract":
+			cfg.Output.EmbeddedLyrics = strings.ToLower(strings.TrimSpace(value))
+		default:
+			return fmt.Errorf("invalid value %q for output.embedded_lyrics (want off, respect, or extract)", value)
+		}
 	case "db.path":
 		cfg.DB.Path = value
 	case "server.addr":
@@ -1316,10 +1458,10 @@ func validateScanStatus(s string) error {
 		return nil
 	}
 	switch s {
-	case scan.StatusPending, scan.StatusProcessing, scan.StatusDone:
+	case scan.StatusPending, scan.StatusProcessing, scan.StatusDone, scan.StatusDeferred:
 		return nil
 	default:
-		return fmt.Errorf("invalid status %q (want pending, processing, or done)", s)
+		return fmt.Errorf("invalid status %q (want pending, processing, done, or deferred)", s)
 	}
 }
 
@@ -1600,7 +1742,15 @@ func runScanResults(ctx context.Context, out io.Writer, args ScanResultsCmd) int
 		}
 	}
 
-	results, err := scanRepo.List(ctx, filter)
+	// "deferred" is not a scan_results status value; it means scan_results whose
+	// linked work_queue row is in benign-miss cooldown (they sit in 'processing'
+	// on the scan side). Resolve those via the work_queue join.
+	var results []models.ScanResult
+	if args.Status == scan.StatusDeferred {
+		results, err = scanRepo.ListDeferred(ctx, filter)
+	} else {
+		results, err = scanRepo.List(ctx, filter)
+	}
 	if err != nil {
 		slog.Error("failed to list scan results", "error", err)
 		return 1

@@ -158,7 +158,32 @@ The watcher is **best-effort and in addition to** the periodic scan, never a rep
 - Events that fire while the container is down are lost; there is no replay. The periodic scan reconciles them.
 - On Linux, very large libraries may require raising the inotify watch limit, e.g. `sysctl fs.inotify.max_user_watches=524288`.
 
-Because the periodic scheduler remains the source of truth, you can safely raise `--scan-interval` to a long backstop (e.g. 6h) when the watcher is enabled.
+#### Watcher-primary mode
+
+Because the periodic scheduler remains the source of truth, you can run the watcher as the primary trigger and demote the periodic scan to a long reconcile backstop. Enable the watcher and raise the interval, e.g.:
+
+```
+MXLRCGO_WATCH_ENABLED=1
+MXLRC_SCAN_INTERVAL=21600   # 6h reconcile backstop (seconds)
+```
+
+The startup scan always runs regardless of the interval, so initial reconciliation is guaranteed. Do **not** set the interval to `0` (scan-once) unless you have verified the watcher actually delivers events on your filesystem, because then nothing reconciles missed events.
+
+#### Verifying watcher events
+
+The watcher emits `INFO "watcher started"` at boot (with library and directory counts). To confirm it is actually receiving events, enable debug logging (`MXLRC_LOG_LEVEL=debug`) and `touch` a file under a library root, then watch for `DEBUG "watcher: event received"` and a follow-up scan. If nothing appears, your filesystem is not delivering inotify events to the container and you must keep the periodic scan as the source of truth. Common offenders: **Unraid `/mnt/user` (FUSE/shfs) bind mounts**, NFS without NFSv4.1 delegations, SMB/CIFS, and Docker Desktop's virtualized mounts.
+
+### Shell completion
+
+`mxlrcgo-svc completion <bash|zsh|fish>` prints a sourceable completion script that completes subcommands, flags, and configured library names (the last queried live from the database, degrading gracefully when it is absent):
+
+```bash
+source <(mxlrcgo-svc completion bash)                 # bash (e.g. in ~/.bashrc)
+source <(mxlrcgo-svc completion zsh)                  # zsh  (e.g. in ~/.zshrc)
+mxlrcgo-svc completion fish > ~/.config/fish/completions/mxlrcgo-svc.fish
+```
+
+The scripts call a hidden `__complete` handler; library-name completion never creates the database.
 
 ### Inspection commands
 

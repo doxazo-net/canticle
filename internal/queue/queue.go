@@ -159,9 +159,9 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 
 	row := tx.QueryRowContext(ctx,
 		`INSERT INTO work_queue (
-             artist, title, artist_key, title_key, outdir, filename, source_path, output_paths, scan_result_id, status, priority, next_attempt_at
+             artist, title, album, album_artist, artist_key, title_key, outdir, filename, source_path, output_paths, scan_result_id, status, priority, next_attempt_at
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(artist_key, title_key) DO UPDATE SET
              artist = CASE
                  WHEN work_queue.status IN ('done', 'processing') THEN work_queue.artist
@@ -170,6 +170,14 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
              title = CASE
                  WHEN work_queue.status IN ('done', 'processing') THEN work_queue.title
                  ELSE excluded.title
+             END,
+             album = CASE
+                 WHEN work_queue.status IN ('done', 'processing') THEN work_queue.album
+                 ELSE excluded.album
+             END,
+             album_artist = CASE
+                 WHEN work_queue.status IN ('done', 'processing') THEN work_queue.album_artist
+                 ELSE excluded.album_artist
              END,
              outdir = CASE
                  WHEN work_queue.status IN ('done', 'processing') THEN work_queue.outdir
@@ -213,10 +221,12 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
                  WHEN work_queue.status = 'done' THEN work_queue.completed_at
                  ELSE NULL
              END
-         RETURNING id, artist, title, outdir, filename, source_path, status, priority, attempts,
+         RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
                    miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
 		inputs.Track.ArtistName,
 		inputs.Track.TrackName,
+		inputs.Track.AlbumName,
+		inputs.Track.AlbumArtist,
 		normalize.NormalizeKey(inputs.Track.ArtistName),
 		normalize.NormalizeKey(inputs.Track.TrackName),
 		inputs.Outdir,
@@ -263,7 +273,7 @@ func (q *DBQueue) Dequeue(ctx context.Context) (WorkItem, error) {
              ORDER BY priority DESC, created_at ASC, id ASC
              LIMIT 1
          )
-         RETURNING id, artist, title, outdir, filename, source_path, status, priority, attempts,
+         RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
                    miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
 		now,
 	)
@@ -398,7 +408,7 @@ func (q *DBQueue) Fail(ctx context.Context, id int64, cause error) (WorkItem, er
              last_error = ?
          WHERE id = ?
            AND status = 'processing'
-         RETURNING id, artist, title, outdir, filename, source_path, status, priority, attempts,
+         RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
                    miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
 		nextAttempts,
 		nextAttemptAt,
@@ -450,7 +460,7 @@ func (q *DBQueue) Defer(ctx context.Context, id int64, retryAfter time.Duration,
              last_error = ?
          WHERE id = ?
            AND status = 'processing'
-         RETURNING id, artist, title, outdir, filename, source_path, status, priority, attempts,
+         RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
                    miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
 		nextAttemptAt,
 		lastError,
@@ -502,7 +512,7 @@ func (q *DBQueue) RetireMiss(ctx context.Context, id int64) (WorkItem, error) {
              last_error = ?
          WHERE id = ?
            AND status = 'processing'
-         RETURNING id, artist, title, outdir, filename, source_path, status, priority, attempts,
+         RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
                    miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
 		now,
 		missLimitReachedError,
@@ -744,7 +754,7 @@ type ListFilter struct {
 // List returns work items ordered by priority desc, created_at asc, id asc,
 // optionally filtered by status and capped by limit.
 func (q *DBQueue) List(ctx context.Context, filter ListFilter) (items []WorkItem, retErr error) {
-	const baseQuery = `SELECT id, artist, title, outdir, filename, source_path, status, priority, attempts,
+	const baseQuery = `SELECT id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
                        miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id
                        FROM work_queue`
 	const orderClause = ` ORDER BY priority DESC, created_at ASC, id ASC`
@@ -809,7 +819,7 @@ func (q *DBQueue) Retry(ctx context.Context, id int64) (WorkItem, error) {
              last_error = ''
          WHERE id = ?
            AND status = 'failed'
-         RETURNING id, artist, title, outdir, filename, source_path, status, priority, attempts,
+         RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
                    miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
 		now,
 		id,
@@ -1112,6 +1122,8 @@ func scanWorkItem(row rowScanner) (WorkItem, error) {
 		&item.ID,
 		&item.Inputs.Track.ArtistName,
 		&item.Inputs.Track.TrackName,
+		&item.Inputs.Track.AlbumName,
+		&item.Inputs.Track.AlbumArtist,
 		&item.Inputs.Outdir,
 		&item.Inputs.Filename,
 		&item.Inputs.SourcePath,
