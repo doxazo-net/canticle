@@ -3,6 +3,7 @@ package musixmatch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -343,6 +344,19 @@ func TestFindLyricsBenignMissesAreClassifiable(t *testing.T) {
 	}
 }
 
+func TestTokenRenewalErrorIsBothSentinels(t *testing.T) {
+	err := fmt.Errorf("wrap: %w", ErrTokenRenewalRequired)
+	if !errors.Is(err, ErrTokenRenewalRequired) {
+		t.Fatal("want errors.Is(_, ErrTokenRenewalRequired) so the worker can distinguish a genuine renewal")
+	}
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatal("want errors.Is(_, ErrUnauthorized) so the circuit breaker still trips on renewal")
+	}
+	if IsBenignMiss(err) {
+		t.Fatal("IsBenignMiss(renewal) = true; want false (renewal is not a benign miss)")
+	}
+}
+
 func TestIsBenignMissRejectsGenuineErrors(t *testing.T) {
 	for name, err := range map[string]error{
 		"unauthorized": ErrUnauthorized,
@@ -367,6 +381,9 @@ func TestFindLyricsInBodyInvalidTokenReturnsErrUnauthorized(t *testing.T) {
 	}
 	if !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("error = %v; want errors.Is(_, ErrUnauthorized) so circuit breaker keys off it", err)
+	}
+	if !errors.Is(err, ErrTokenRenewalRequired) {
+		t.Fatalf("error = %v; want errors.Is(_, ErrTokenRenewalRequired) so the worker can treat hint=renew as a genuine auth failure", err)
 	}
 }
 
