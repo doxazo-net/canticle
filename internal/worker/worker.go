@@ -392,6 +392,11 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			if err := w.queue.Complete(context.WithoutCancel(ctx), item.ID); err != nil {
 				return w.fail(ctx, item, fmt.Errorf("worker: complete guard-rejected item %d: %w", item.ID, err))
 			}
+			// Reset the failure backoff only after the terminal Complete durably
+			// succeeds (mirroring the benign-miss and normal-success paths): a
+			// prior transient w.fail must not keep later guard-rejected items in
+			// backoff once the provider is demonstrably healthy.
+			w.consecutiveFailures = 0
 			return nil
 		}
 		if err := w.store(ctx, resolvedTrack, song); err != nil {
