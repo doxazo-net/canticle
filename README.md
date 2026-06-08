@@ -20,7 +20,7 @@ Full documentation is published at **<https://sydlexius.github.io/mxlrcgo-svc/>*
 
 Versioned binaries for Linux, macOS, and Windows (amd64/arm64 where supported) are published on the [GitHub Releases](https://github.com/sydlexius/mxlrcgo-svc/releases) page.
 
-Build from source (requires Go 1.26.2+):
+Build from source (requires Go 1.26.4+):
 
 ```sh
 go install github.com/sydlexius/mxlrcgo-svc/cmd/mxlrcgo-svc@latest

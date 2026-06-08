@@ -88,7 +88,7 @@ hooks:
 
 ## docs-deps: Install the Python documentation tooling (ProperDocs + Material)
 docs-deps:
-	pip install -r dev-requirements.txt
+	pip install --require-hashes -r dev-requirements.lock
 
 ## docs-serve: Live-reload preview of the documentation site
 docs-serve:
