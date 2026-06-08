@@ -468,10 +468,6 @@ func runFetch(ctx context.Context, out io.Writer, args FetchCmd, newFetcher func
 	if token == "" {
 		token = cfg.API.Token
 	}
-	if token == "" {
-		slog.Error("no API token provided: use --token flag, MUSIXMATCH_TOKEN env var, MXLRC_API_TOKEN env var, or config file")
-		return 1
-	}
 	cooldown := cfg.API.Cooldown
 	if args.Cooldown != nil {
 		cooldown = *args.Cooldown
@@ -592,10 +588,6 @@ func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixm
 	token := args.Token
 	if token == "" {
 		token = cfg.API.Token
-	}
-	if token == "" {
-		slog.Error("no API token provided: serve needs a token for the worker")
-		return 1
 	}
 	outdir := cfg.Output.Dir
 	if args.Outdir != nil {
@@ -763,12 +755,21 @@ func selectedProvider(cfg config.Config, token string, newFetcher func(string) m
 	// results are screened by the worker's language guard like any other.
 	petit := petitlyrics.NewClient()
 	petit.WithMinInterval(time.Duration(cfg.API.Cooldown) * time.Second)
-	return providers.Select(
+	p, err := providers.Select(
 		cfg.Providers.Primary,
 		cfg.Providers.Disabled,
 		providers.New(providers.Musixmatch, fetcher),
 		providers.New(providers.PetitLyrics, petit),
 	)
+	if err != nil {
+		return nil, err
+	}
+	// The API token requirement is provider-specific: only Musixmatch needs one.
+	// petitlyrics is tokenless, so a missing token must not block it.
+	if p.Name() == providers.Musixmatch && strings.TrimSpace(token) == "" {
+		return nil, fmt.Errorf("no API token provided for the musixmatch provider: use --token, MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, or config file")
+	}
+	return p, nil
 }
 
 func newVerifier(cfg config.Config) (verification.Verifier, error) {

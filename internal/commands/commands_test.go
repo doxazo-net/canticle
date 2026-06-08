@@ -52,9 +52,17 @@ func TestSelectedProvider(t *testing.T) {
 	}
 }
 
+func TestSelectedProviderMusixmatchRequiresToken(t *testing.T) {
+	cfg := config.Config{Providers: config.ProvidersConfig{Primary: "musixmatch"}}
+	if _, err := selectedProvider(cfg, "  ", func(string) musixmatch.Fetcher { return fakeFetcher{} }); err == nil {
+		t.Fatal("musixmatch with an empty token must return an error")
+	}
+}
+
 func TestSelectedProviderPetitLyrics(t *testing.T) {
 	cfg := config.Config{Providers: config.ProvidersConfig{Primary: "petitlyrics"}}
-	got, err := selectedProvider(cfg, "token", func(string) musixmatch.Fetcher { return fakeFetcher{} })
+	// petitlyrics is tokenless: an empty token must NOT block it.
+	got, err := selectedProvider(cfg, "", func(string) musixmatch.Fetcher { return fakeFetcher{} })
 	if err != nil {
 		t.Fatalf("selectedProvider: %v", err)
 	}
