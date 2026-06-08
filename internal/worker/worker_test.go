@@ -570,6 +570,12 @@ func TestRunOnceRejectedVerificationMarksQueueFailed(t *testing.T) {
 	if len(q.completed) != 0 {
 		t.Fatalf("completed = %v; want none", q.completed)
 	}
+	// The provider fetch succeeded; only STT verification rejected the result. The
+	// circuit must still record the successful round-trip, so a later bare 401 is
+	// classified as throttling rather than a token that never worked.
+	if !w.circuit.EverSucceeded() {
+		t.Fatal("circuit EverSucceeded = false; a successful fetch must record success even when verification fails")
+	}
 }
 
 func TestRunOnceStoresCacheWithRequestedTrackKeys(t *testing.T) {
@@ -1441,8 +1447,8 @@ func TestCircuitHalfOpenThenRecovers(t *testing.T) {
 	if !hasLog(*recs, slog.LevelInfo, "circuit closed; provider recovered") {
 		t.Fatalf("logs = %+v; want Info recovery after a successful probe round-trip", *recs)
 	}
-	if w.circuit.Allow() != circuit.StateClosed {
-		t.Fatal("circuitProbing = true; want cleared (StateClosed) after recovery")
+	if got := w.circuit.Allow(); got != circuit.StateClosed {
+		t.Fatalf("circuit state = %v; want StateClosed after recovery", got)
 	}
 }
 

@@ -350,6 +350,15 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	confidence := Confidence(item.Inputs.Track, song.Track)
 	slog.Debug("worker lyrics match", "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "confidence", confidence, "cache_hit", cacheHit)
 	if !cacheHit {
+		// A non-cache provider fetch succeeded: the token is proven good this
+		// session (a later bare 401 is throttling, not a dead token), so record the
+		// success and recover the circuit NOW, before downstream processing. The
+		// verify/guard/store steps below are not throttle signals; their failures
+		// continue through the normal queue backoff path, but the breaker must not
+		// forget that the fetch itself worked just because a later step failed.
+		if w.circuit.RecordSuccess() {
+			slog.Info("worker circuit closed; provider recovered")
+		}
 		if err := w.verify(ctx, item, song, confidence); err != nil {
 			slog.Warn("worker verification failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "confidence", confidence, "error", err)
 			return w.fail(ctx, item, err)
@@ -361,14 +370,10 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		// (so it is neither cached nor written, never retried, and does not trip the
 		// circuit) rather than calling w.fail (retriable) or deferring it.
 		if reject, reason := w.guardReject(item, song); reject {
-			// The provider round-trip still SUCCEEDED (we fetched real lyrics and
-			// only rejected them on script policy), so recover throttle/circuit
-			// state exactly as the store-success path below does: the token is
-			// proven good and an earlier transient trip must not pin the worker in
-			// backoff after a healthy fetch.
-			if w.circuit.RecordSuccess() {
-				slog.Info("worker circuit closed; provider recovered")
-			}
+			// The provider round-trip already recorded circuit success above (the
+			// fetch worked; only the script policy rejected the result). Here we
+			// just finalize the policy rejection: neither cached nor written, and
+			// not retried.
 			slog.Warn("worker guard rejected lyrics", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "reason", reason)
 			if err := w.queue.Complete(context.WithoutCancel(ctx), item.ID); err != nil {
 				return w.fail(ctx, item, fmt.Errorf("worker: complete guard-rejected item %d: %w", item.ID, err))
@@ -383,14 +388,6 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		if err := w.store(ctx, resolvedTrack, song); err != nil {
 			slog.Warn("worker cache store failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", err)
 			return w.fail(ctx, item, err)
-		}
-		// A genuine non-cache provider fetch succeeded: the token is proven good
-		// this session, so a later bare 401 is throttling rather than a dead token.
-		// Reset the throttle ramp too. Placed here (not at the shared
-		// consecutiveFailures reset below) so cache hits, which never touch the
-		// provider, do not falsely mark a provider success.
-		if w.circuit.RecordSuccess() {
-			slog.Info("worker circuit closed; provider recovered")
 		}
 	}
 
