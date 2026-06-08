@@ -138,7 +138,7 @@ func (c *Client) do(ctx context.Context, req *http.Request, stage string) (*http
 	if err := c.pace(ctx); err != nil {
 		return nil, err
 	}
-	res, err := c.httpClient.Do(req)
+	res, err := c.httpClient.Do(req) //nolint:gosec // G704: the request host is c.baseURL, a fixed petitlyrics.com const overridden only by tests; track inputs go in the form body, not the URL, so there is no user-controlled SSRF vector.
 	if err != nil {
 		return nil, fmt.Errorf("petitlyrics: %s: %w", stage, err)
 	}
