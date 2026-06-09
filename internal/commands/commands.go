@@ -629,6 +629,11 @@ func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixm
 	w := worker.New(workQ, cache.New(sqlDB), fetcher, writer)
 	w.SetCircuitOpenDuration(time.Duration(cfg.API.CircuitOpenDuration) * time.Second)
 	w.SetCircuitBackoff(time.Duration(cfg.API.CircuitBackoffBase)*time.Second, time.Duration(cfg.API.CircuitOpenDuration)*time.Second)
+	// Dispatch strategy and the parallel-mode synced-upgrade window. Set before the
+	// fallback lanes for clarity; the worker rebuilds the orchestrator on every
+	// setter, so the ordering is not load-bearing.
+	w.SetProvidersMode(cfg.Providers.Mode)
+	w.SetRaceWait(time.Duration(cfg.Providers.RaceWaitSeconds) * time.Second)
 	// Register fallback lanes (each with its own breaker) and stamp the active
 	// provider set's generation onto both the queue (write-on-enqueue) and the
 	// worker (compare-on-lookup) so a provider-set change invalidates stale cached
