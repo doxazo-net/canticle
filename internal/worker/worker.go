@@ -86,10 +86,15 @@ type Worker struct {
 	// reset, throttle classification and logging); the worker maps the
 	// orchestrator's outcome onto its queue side-effects.
 	orch *orchestrator.Orchestrator
-	// lane is the single Musixmatch lane held by orch. The worker keeps a direct
-	// reference so the throttle queue side-effects (release, stale-failure reset)
-	// can read the lane's breaker outcome; it shares w.circuit.
-	lane                  *orchestrator.Lane
+	// lane is the primary (Musixmatch) lane held by orch. The worker keeps a
+	// direct reference so the throttle queue side-effects (release, stale-failure
+	// reset) can read the primary lane's breaker outcome; it shares w.circuit.
+	lane *orchestrator.Lane
+	// lanes holds every lane the orchestrator dispatches over, primary first, each
+	// with its own independent circuit.Breaker (never a shared pool). The circuit
+	// config setters and the RunOnce idle gate fan out across all of them, and a
+	// fallback lane is appended by SetFallbackProviders.
+	lanes                 []*orchestrator.Lane
 	writer                lyrics.Writer
 	verifier              verification.Verifier
 	verifyBelowConfidence float64
@@ -112,10 +117,22 @@ type Worker struct {
 	// state and the geometric backoff ramp. It is driven through Allow / Trip /
 	// TripRenewal / RecordSuccess / RecordBenignMiss / EverSucceeded so the
 	// worker carries no breaker state of its own. See internal/circuit.
-	circuit         *circuit.Breaker
-	missBackoffBase time.Duration
-	missBackoffCap  time.Duration
-	maxMissAttempts int
+	circuit *circuit.Breaker
+	// circuitBackoffBase and circuitOpenDuration mirror the breaker window
+	// parameters last set via SetCircuitBackoff / SetCircuitOpenDuration so a
+	// fallback lane added later (SetFallbackProviders) gets a breaker configured
+	// to match the primary, regardless of setter ordering.
+	circuitBackoffBase  time.Duration
+	circuitOpenDuration time.Duration
+	missBackoffBase     time.Duration
+	missBackoffCap      time.Duration
+	maxMissAttempts     int
+	// providersVersion is the current providers generation (providers.Generation
+	// over the active set). When non-zero and a dequeued item's stored
+	// ProvidersVersion differs, the cache is bypassed so the result is revalidated
+	// against the current provider set. 0 means "not configured" (cache always
+	// honored), preserving single-provider behavior.
+	providersVersion int
 }
 
 var errQueueEmpty = errors.New("worker queue empty")
@@ -137,6 +154,7 @@ func New(q Queue, c Cache, fetcher musixmatch.Fetcher, writer lyrics.Writer) *Wo
 		cache:                 c,
 		orch:                  orch,
 		lane:                  lane,
+		lanes:                 []*orchestrator.Lane{lane},
 		writer:                writer,
 		verifyBelowConfidence: 0.85,
 		baseBackoff:           backoff.DefaultBase,
@@ -144,6 +162,8 @@ func New(q Queue, c Cache, fetcher musixmatch.Fetcher, writer lyrics.Writer) *Wo
 		sleep:                 sleepCtx,
 		now:                   now,
 		circuit:               cb,
+		circuitBackoffBase:    defaultCircuitBackoffBase,
+		circuitOpenDuration:   defaultCircuitOpenDuration,
 		missBackoffBase:       backoff.DefaultMissBase,
 		missBackoffCap:        backoff.DefaultMissCap,
 		// maxMissAttempts defaults to 0 (no cap). Non-serve callers (tests, ad-hoc
@@ -158,7 +178,55 @@ func New(q Queue, c Cache, fetcher musixmatch.Fetcher, writer lyrics.Writer) *Wo
 // less than or equal to zero are ignored; clamping against any minimum
 // is the responsibility of the caller (typically the config layer).
 func (w *Worker) SetCircuitOpenDuration(d time.Duration) {
-	w.circuit.SetOpenDuration(d)
+	if d > 0 {
+		w.circuitOpenDuration = d
+	}
+	for _, l := range w.lanes {
+		l.Breaker().SetOpenDuration(d)
+	}
+}
+
+// SetFallbackProviders registers ordered fallback lanes consulted after the
+// primary Musixmatch lane. Each provider becomes a lane with its OWN independent
+// circuit.Breaker (never a shared pool), configured to match the primary's
+// current window parameters and clock, so tripping one lane never pauses a
+// sibling. The orchestrator is rebuilt over [primary, ...fallbacks] and, once
+// more than one lane exists, the script guard is wired into suitability so a
+// guard-failing primary result falls through to the next provider. Calling it
+// again replaces the previously-registered fallbacks.
+func (w *Worker) SetFallbackProviders(provs ...providers.LyricsProvider) {
+	lanes := []*orchestrator.Lane{w.lane}
+	for _, p := range provs {
+		if p == nil {
+			continue
+		}
+		cb := circuit.New(w.circuitBackoffBase, w.circuitOpenDuration)
+		cb.SetClock(w.now)
+		lanes = append(lanes, orchestrator.NewLane(p, cb))
+	}
+	orch, err := orchestrator.New(orchestrator.ModeOrdered, lanes...)
+	if err != nil {
+		// lanes always includes the non-nil primary and ModeOrdered is a constant,
+		// so New cannot error here; keep the prior orchestrator if it somehow does.
+		slog.Error("worker: rebuild orchestrator with fallback lanes", "error", err)
+		return
+	}
+	w.orch = orch
+	w.lanes = lanes
+	// With more than one lane the guard governs fall-through, so wire it into
+	// suitability. With a single lane it stays unset (the worker's guardReject is
+	// the sole screen), preserving exactly-one Accept call per result.
+	if len(w.lanes) > 1 && w.scriptGuard != nil {
+		w.orch.SetGuard(w.scriptGuard)
+	}
+}
+
+// SetProvidersVersion sets the current providers generation used to invalidate
+// stale cached results. When non-zero, a dequeued item whose stored
+// ProvidersVersion differs bypasses the cache and is re-fetched against the
+// current provider set. A value of 0 (the default) honors the cache always.
+func (w *Worker) SetProvidersVersion(v int) {
+	w.providersVersion = v
 }
 
 // SetMissBackoff overrides the geometric miss-cadence parameters. base sets the
@@ -183,7 +251,15 @@ func (w *Worker) SetMissBackoff(base, cap time.Duration) {
 // misconfigured call cannot disable the window; clamping against any minimum is
 // the responsibility of the caller (typically the config layer).
 func (w *Worker) SetCircuitBackoff(base, cap time.Duration) {
-	w.circuit.SetBackoff(base, cap)
+	if base > 0 {
+		w.circuitBackoffBase = base
+	}
+	if cap > 0 {
+		w.circuitOpenDuration = cap
+	}
+	for _, l := range w.lanes {
+		l.Breaker().SetBackoff(base, cap)
+	}
 }
 
 // SetMaxMissAttempts overrides the miss-attempt cap. When miss_count exceeds
@@ -201,7 +277,22 @@ func (w *Worker) SetMaxMissAttempts(n int) {
 // from New.
 func (w *Worker) setClock(now func() time.Time) {
 	w.now = now
-	w.circuit.SetClock(now)
+	for _, l := range w.lanes {
+		l.Breaker().SetClock(now)
+	}
+}
+
+// allLanesUnavailable reports whether every lane's breaker is open, so the
+// worker should idle rather than dequeue. A lane whose window has elapsed
+// transitions to half-open (not open) here, so it is treated as available for a
+// probe. With a single lane this is identical to the prior primary-only gate.
+func (w *Worker) allLanesUnavailable() bool {
+	for _, l := range w.lanes {
+		if l.Breaker().Allow() != circuit.StateOpen {
+			return false
+		}
+	}
+	return true
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) {
@@ -228,13 +319,17 @@ func (w *Worker) EnableVerification(verifier verification.Verifier, belowConfide
 // results whose script mix falls outside the configured allowlist.
 func (w *Worker) EnableGuard(g ScriptGuard) {
 	w.scriptGuard = g
-	// The orchestrator's suitability guard is deliberately left unset here. With a
-	// single lane there is no fall-through decision for it to make, and setting it
-	// would screen every result twice (once for suitability, once for the worker's
-	// terminal policy check below). The worker's own guard therefore stays the
-	// single screening point, preserving exactly-one Accept call per result.
-	// Wiring w.orch.SetGuard belongs with the change that adds a second lane, where
-	// the guard genuinely governs whether to advance to the next provider.
+	// With more than one lane the guard governs fall-through (a guard-failing but
+	// quality-OK primary result must be unsuitable so the orchestrator advances to
+	// the next provider), so wire it into suitability. With a single lane there is
+	// no fall-through decision and setting it would screen every result twice (once
+	// in suitability, once in the worker's terminal guardReject below), so the
+	// worker's own guard stays the sole screening point, preserving exactly-one
+	// Accept call per result. SetFallbackProviders performs the same wiring when
+	// fallbacks are added after the guard, so the two are order-independent.
+	if len(w.lanes) > 1 {
+		w.orch.SetGuard(g)
+	}
 }
 
 // guardReject reports whether the script guard rejects this song. It returns
@@ -321,7 +416,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// emitted at the actual provider call (see song) so an empty-queue ticker
 	// tick does not log a phantom probe. Recovery is only confirmed once a
 	// round-trip succeeds.
-	if w.circuit.Allow() == circuit.StateOpen {
+	if w.allLanesUnavailable() {
 		return errQueueEmpty
 	}
 	item, err := w.queue.Dequeue(ctx)
@@ -339,7 +434,12 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	resolvedTrack := item.Inputs.Track
 	resolvedTrack.ArtistName = normalize.ResolveArtist(item.Inputs.Track.AlbumArtist, item.Inputs.Track.ArtistName)
 
-	song, cacheHit, err := w.song(ctx, resolvedTrack)
+	// A configured providers generation that no longer matches the stamp the item
+	// was enqueued under means a cached result (if any) predates the current
+	// provider set: bypass the cache so the orchestrator revalidates the track
+	// against today's lanes (Gap 1 of docs/multi-provider-orchestration.md).
+	bypassCache := w.providersVersion != 0 && item.ProvidersVersion != w.providersVersion
+	song, cacheHit, err := w.song(ctx, resolvedTrack, bypassCache)
 	if err != nil {
 		switch orchestrator.ClassifyOutcome(err) {
 		case orchestrator.OutcomeUnavailable:
@@ -464,21 +564,23 @@ func (w *Worker) verify(ctx context.Context, item queue.WorkItem, song models.So
 // song looks up or fetches lyrics for track. The caller is responsible for
 // resolving the matching artist (see RunOnce); song uses track verbatim for both
 // the cache lookup and the provider query so the cache read/write keys agree.
-func (w *Worker) song(ctx context.Context, track models.Track) (models.Song, bool, error) {
-	cached, err := w.cache.LookupExact(ctx, track.ArtistName, track.TrackName, track.AlbumName)
-	if err == nil {
-		return decodeSong(cached, track), true, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return models.Song{}, false, fmt.Errorf("worker: lookup exact cache: %w", err)
-	}
+func (w *Worker) song(ctx context.Context, track models.Track, bypassCache bool) (models.Song, bool, error) {
+	if !bypassCache {
+		cached, err := w.cache.LookupExact(ctx, track.ArtistName, track.TrackName, track.AlbumName)
+		if err == nil {
+			return decodeSong(cached, track), true, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return models.Song{}, false, fmt.Errorf("worker: lookup exact cache: %w", err)
+		}
 
-	cached, err = w.cache.LookupFallback(ctx, track.ArtistName, track.TrackName)
-	if err == nil {
-		return decodeSong(cached, track), true, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return models.Song{}, false, fmt.Errorf("worker: lookup fallback cache: %w", err)
+		cached, err = w.cache.LookupFallback(ctx, track.ArtistName, track.TrackName)
+		if err == nil {
+			return decodeSong(cached, track), true, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return models.Song{}, false, fmt.Errorf("worker: lookup fallback cache: %w", err)
+		}
 	}
 
 	// Dispatch through the orchestrator. The lane owns the circuit interaction:
