@@ -18,14 +18,28 @@ func laneFor(p *stubProvider) *Lane {
 }
 
 func TestNewModeRejectsUnknown(t *testing.T) {
-	if _, err := New("parallel", nil); err == nil {
+	p := &stubProvider{name: "musixmatch"}
+	if _, err := New("parallel", laneFor(p)); err == nil {
 		t.Fatal("New(parallel) should error: only ordered is supported")
 	}
-	if _, err := New("ordered"); err != nil {
+	if _, err := New("ordered", laneFor(p)); err != nil {
 		t.Fatalf("New(ordered): %v", err)
 	}
-	if _, err := New(""); err != nil {
+	if _, err := New("", laneFor(p)); err != nil {
 		t.Fatalf("New(empty) should default to ordered: %v", err)
+	}
+}
+
+func TestNewValidatesLanes(t *testing.T) {
+	if _, err := New("ordered"); err == nil {
+		t.Fatal("New with no lanes should error (avoids a nil dispatch)")
+	}
+	if _, err := New("ordered", nil); err == nil {
+		t.Fatal("New with a nil lane should error")
+	}
+	p := &stubProvider{name: "musixmatch"}
+	if _, err := New("ordered", laneFor(p), nil); err == nil {
+		t.Fatal("New with a nil lane among valid lanes should error")
 	}
 }
 

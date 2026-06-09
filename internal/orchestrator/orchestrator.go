@@ -40,6 +40,14 @@ func New(mode string, lanes ...*Lane) (*Orchestrator, error) {
 	if mode != ModeOrdered {
 		return nil, fmt.Errorf("orchestrator: unsupported mode %q (only %q is implemented)", mode, ModeOrdered)
 	}
+	if len(lanes) == 0 {
+		return nil, fmt.Errorf("orchestrator: at least one lane is required")
+	}
+	for i, l := range lanes {
+		if l == nil {
+			return nil, fmt.Errorf("orchestrator: lane %d is nil", i)
+		}
+	}
 	return &Orchestrator{lanes: lanes, mode: mode}, nil
 }
 
