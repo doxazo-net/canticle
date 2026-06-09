@@ -94,9 +94,12 @@ type WorkItem struct {
 	Priority  int
 	Attempts  int
 	MissCount int
-	// ProvidersVersion is a reserved seam for the future multi-source re-check
-	// sweep (issue #103, slice 103d). No code path writes it yet, so it is
-	// always 0 today; do not read a real provider generation from it.
+	// ProvidersVersion is the active provider-set generation (providers.Generation)
+	// stamped onto the row at enqueue time. It is written only on the initial
+	// insert; the ON CONFLICT refresh and the Defer/RecheckDeferred paths leave it
+	// unchanged, so a row keeps the generation it was first enqueued under. The
+	// worker compares it against the current generation to invalidate cached
+	// results when the provider set changes. 0 means "no generation configured".
 	ProvidersVersion int
 	NextAttemptAt    time.Time
 	LastError        string
@@ -116,6 +119,11 @@ type DBQueue struct {
 	// (via SetRandomized) to restore deterministic created_at/id ordering. Also
 	// doubles as the test seam for deterministic ordering assertions.
 	randomized bool
+	// providersVersion is the current providers generation stamped onto new
+	// work_queue rows by Enqueue. 0 means "not configured" and preserves
+	// backward compatibility with call sites that do not supply a generation.
+	// Set via SetProvidersVersion from the commands layer after config is loaded.
+	providersVersion int
 }
 
 // NewDBQueue returns a durable queue backed by db.
@@ -134,6 +142,14 @@ func NewDBQueue(db *sql.DB) *DBQueue {
 // without changing the NewDBQueue call sites.
 func (q *DBQueue) SetRandomized(b bool) {
 	q.randomized = b
+}
+
+// SetProvidersVersion configures the providers generation stamped onto new
+// work_queue rows by Enqueue. The generation is computed by providers.Generation
+// from the current active provider set and changes when providers are added or
+// removed. A value of 0 (the default) preserves backward compatibility.
+func (q *DBQueue) SetProvidersVersion(v int) {
+	q.providersVersion = v
 }
 
 // Enqueue atomically inserts a new work item or refreshes an existing retryable
@@ -172,9 +188,9 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 
 	row := tx.QueryRowContext(ctx,
 		`INSERT INTO work_queue (
-             artist, title, album, album_artist, artist_key, title_key, outdir, filename, source_path, output_paths, scan_result_id, status, priority, next_attempt_at
+             artist, title, album, album_artist, artist_key, title_key, outdir, filename, source_path, output_paths, scan_result_id, status, priority, providers_version, next_attempt_at
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(artist_key, title_key) DO UPDATE SET
              artist = CASE
                  WHEN work_queue.status IN ('done', 'processing') THEN work_queue.artist
@@ -249,6 +265,7 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 		nullableID(inputs.ScanResultID),
 		StatusPending,
 		priority,
+		q.providersVersion,
 		now,
 		refreshFailedBackoff,
 		refreshFailedBackoff,

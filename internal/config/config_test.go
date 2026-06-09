@@ -20,7 +20,7 @@ func isolateEnv(t *testing.T) {
 		"MXLRC_MISS_BACKOFF_BASE_HOURS", "MXLRC_MISS_BACKOFF_CAP_HOURS", "MXLRC_MAX_MISS_ATTEMPTS",
 		"MXLRC_OUTPUT_DIR", "MXLRC_BILINGUAL_OUTPUT", "MXLRC_SERVER_ADDR", "MXLRC_WEBHOOK_API_KEY",
 		"MXLRC_SCAN_INTERVAL", "MXLRC_WORK_INTERVAL",
-		"MXLRC_PROVIDER_PRIMARY", "MXLRC_PROVIDERS_DISABLED", "MXLRC_PROVIDERS_MODE",
+		"MXLRC_PROVIDER_PRIMARY", "MXLRC_PROVIDERS_DISABLED", "MXLRC_PROVIDERS_MODE", "MXLRC_PROVIDERS_FALLBACK_ORDER",
 		"MXLRC_VERIFICATION_ENABLED", "MXLRC_VERIFICATION_WHISPER_URL", "MXLRC_WHISPER_URL",
 		"MXLRC_VERIFICATION_FFMPEG_PATH",
 		"MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS", "MXLRC_VERIFICATION_SAMPLE_DURATION",
@@ -1189,6 +1189,46 @@ func TestProvidersModeEnvOverrideAndValidation(t *testing.T) {
 		}
 		if cfg.Providers.Mode != "ordered" {
 			t.Fatalf("blank mode = %q; want ordered default", cfg.Providers.Mode)
+		}
+	})
+}
+
+func TestProvidersFallbackOrder(t *testing.T) {
+	t.Run("default is empty", func(t *testing.T) {
+		isolateEnv(t)
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if len(cfg.Providers.FallbackOrder) != 0 {
+			t.Fatalf("default fallback_order = %v; want empty", cfg.Providers.FallbackOrder)
+		}
+	})
+
+	t.Run("env override normalizes and dedups", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_PROVIDERS_FALLBACK_ORDER", "PetitLyrics, petitlyrics , musixmatch")
+		cfg, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		got := cfg.Providers.FallbackOrder
+		want := []string{"petitlyrics", "musixmatch"}
+		if len(got) != len(want) {
+			t.Fatalf("fallback_order = %v; want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("fallback_order = %v; want %v", got, want)
+			}
+		}
+	})
+
+	t.Run("unknown provider is rejected", func(t *testing.T) {
+		isolateEnv(t)
+		t.Setenv("MXLRC_PROVIDERS_FALLBACK_ORDER", "petitlyrics, bogus")
+		if _, err := Load(filepath.Join(t.TempDir(), "nonexistent.toml")); err == nil {
+			t.Fatal("Load with an unknown fallback provider returned nil error; want a rejection")
 		}
 	})
 }
