@@ -10,7 +10,9 @@ import (
 )
 
 // CacheRepo provides read/write access to the lyrics_cache table.
-// All artist/title/album strings are normalized before storage and lookup.
+// All artist/title strings are normalized before storage and lookup.
+// The unique cache key is (artist, title, duration_bucket); bucket 0 is the
+// unknown-duration sentinel (see #191 for real-duration wiring).
 type CacheRepo struct {
 	db *sql.DB
 }
@@ -20,55 +22,37 @@ func New(db *sql.DB) *CacheRepo {
 	return &CacheRepo{db: db}
 }
 
-// LookupExact returns the cached lyrics for the exact (artist, title, album) triple
-// after normalization. Returns sql.ErrNoRows if not found.
-func (r *CacheRepo) LookupExact(ctx context.Context, artist, title, album string) (string, error) {
-	var lyrics string
-	err := r.db.QueryRowContext(ctx,
-		`SELECT lyrics FROM lyrics_cache WHERE artist=? AND title=? AND album=? LIMIT 1`,
-		normalize.NormalizeKey(artist),
-		normalize.NormalizeKey(title),
-		normalize.NormalizeKey(album),
-	).Scan(&lyrics)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", sql.ErrNoRows
-	}
-	if err != nil {
-		return "", fmt.Errorf("cache: lookup exact: %w", err)
-	}
-	return lyrics, nil
-}
-
-// LookupFallback returns the most recently updated cached lyrics matching
-// (artist, title) regardless of album, after normalization.
+// Lookup returns the cached lyrics for (artist, title, durationBucket) after
+// normalization. Pass durationBucket=0 when the recording duration is unknown.
 // Returns sql.ErrNoRows if not found.
-func (r *CacheRepo) LookupFallback(ctx context.Context, artist, title string) (string, error) {
+func (r *CacheRepo) Lookup(ctx context.Context, artist, title string, durationBucket int) (string, error) {
 	var lyrics string
 	err := r.db.QueryRowContext(ctx,
-		`SELECT lyrics FROM lyrics_cache WHERE artist=? AND title=? ORDER BY updated_at DESC, id DESC LIMIT 1`,
+		`SELECT lyrics FROM lyrics_cache WHERE artist=? AND title=? AND duration_bucket=? LIMIT 1`,
 		normalize.NormalizeKey(artist),
 		normalize.NormalizeKey(title),
+		durationBucket,
 	).Scan(&lyrics)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", sql.ErrNoRows
 	}
 	if err != nil {
-		return "", fmt.Errorf("cache: lookup fallback: %w", err)
+		return "", fmt.Errorf("cache: lookup: %w", err)
 	}
 	return lyrics, nil
 }
 
-// Store inserts or updates (upsert) the lyrics for the (artist, title, album) triple.
-// Keys are normalized before storage. updated_at is maintained by the database trigger.
-func (r *CacheRepo) Store(ctx context.Context, artist, title, album, lyrics string) error {
+// Store inserts or updates (upsert) the lyrics for (artist, title, durationBucket).
+// Keys are normalized before storage. updated_at is maintained by a database trigger.
+func (r *CacheRepo) Store(ctx context.Context, artist, title string, durationBucket int, lyrics string) error {
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO lyrics_cache (artist, title, album, lyrics)
+		`INSERT INTO lyrics_cache (artist, title, duration_bucket, lyrics)
          VALUES (?, ?, ?, ?)
-         ON CONFLICT(artist, title, album) DO UPDATE SET
+         ON CONFLICT(artist, title, duration_bucket) DO UPDATE SET
              lyrics = excluded.lyrics`,
 		normalize.NormalizeKey(artist),
 		normalize.NormalizeKey(title),
-		normalize.NormalizeKey(album),
+		durationBucket,
 		lyrics,
 	)
 	if err != nil {

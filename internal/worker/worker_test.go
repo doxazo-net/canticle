@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -182,39 +183,27 @@ func (q *fakeQueue) removeFromProcessing(id int64) {
 type cacheStore struct {
 	artist string
 	title  string
-	album  string
 	lyrics string
 }
 
 type fakeCache struct {
-	exact    string
-	fallback string
-	err      error
-	stores   []cacheStore
+	hit    string
+	err    error
+	stores []cacheStore
 }
 
-func (c *fakeCache) LookupExact(context.Context, string, string, string) (string, error) {
+func (c *fakeCache) Lookup(_ context.Context, _ string, _ string, _ int) (string, error) {
 	if c.err != nil {
 		return "", c.err
 	}
-	if c.exact == "" {
+	if c.hit == "" {
 		return "", sql.ErrNoRows
 	}
-	return c.exact, nil
+	return c.hit, nil
 }
 
-func (c *fakeCache) LookupFallback(context.Context, string, string) (string, error) {
-	if c.err != nil {
-		return "", c.err
-	}
-	if c.fallback == "" {
-		return "", sql.ErrNoRows
-	}
-	return c.fallback, nil
-}
-
-func (c *fakeCache) Store(_ context.Context, artist, title, album, lyrics string) error {
-	c.stores = append(c.stores, cacheStore{artist: artist, title: title, album: album, lyrics: lyrics})
+func (c *fakeCache) Store(_ context.Context, artist, title string, _ int, lyrics string) error {
+	c.stores = append(c.stores, cacheStore{artist: artist, title: title, lyrics: lyrics})
 	return nil
 }
 
@@ -401,7 +390,7 @@ func TestRunOnceCacheHitAvoidsFetcherAndCompletes(t *testing.T) {
 			Filename: "artist-title.lrc",
 		},
 	}}}
-	cache := &fakeCache{exact: cached}
+	cache := &fakeCache{hit: cached}
 	fetcher := &fakeFetcher{}
 	writer := &fakeWriter{}
 
@@ -605,7 +594,7 @@ func TestRunOnceStoresCacheWithRequestedTrackKeys(t *testing.T) {
 		t.Fatalf("cache stores = %d; want 1", len(cache.stores))
 	}
 	store := cache.stores[0]
-	if store.artist != track.ArtistName || store.title != track.TrackName || store.album != track.AlbumName {
+	if store.artist != track.ArtistName || store.title != track.TrackName {
 		t.Fatalf("cache store key = %+v; want requested track %+v", store, track)
 	}
 }
@@ -1322,7 +1311,7 @@ func TestRunOnceCacheHitDoesNotMarkProviderSuccess(t *testing.T) {
 		t.Fatalf("encodeSong: %v", err)
 	}
 	q := &fakeQueue{items: []queue.WorkItem{{ID: 9, Inputs: models.Inputs{Track: track, OutputPaths: []models.OutputPath{{Outdir: "out", Filename: "a.lrc"}}}}}}
-	w := New(q, &fakeCache{exact: cached}, &fakeFetcher{}, &fakeWriter{})
+	w := New(q, &fakeCache{hit: cached}, &fakeFetcher{}, &fakeWriter{})
 
 	if err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -1480,7 +1469,7 @@ type fakeCacheToggle struct {
 	idx     int
 }
 
-func (c *fakeCacheToggle) LookupExact(context.Context, string, string, string) (string, error) {
+func (c *fakeCacheToggle) Lookup(_ context.Context, _ string, _ string, _ int) (string, error) {
 	hit := false
 	if c.idx < len(c.hits) {
 		hit = c.hits[c.idx]
@@ -1492,11 +1481,7 @@ func (c *fakeCacheToggle) LookupExact(context.Context, string, string, string) (
 	return "", sql.ErrNoRows
 }
 
-func (c *fakeCacheToggle) LookupFallback(context.Context, string, string) (string, error) {
-	return "", sql.ErrNoRows
-}
-
-func (c *fakeCacheToggle) Store(context.Context, string, string, string, string) error {
+func (c *fakeCacheToggle) Store(context.Context, string, string, int, string) error {
 	return nil
 }
 
@@ -1510,6 +1495,62 @@ func TestConfidence(t *testing.T) {
 
 	if score := Confidence(want, got); score != 1 {
 		t.Fatalf("Confidence() = %v; want 1", score)
+	}
+}
+
+// TestDecodeSong_InstrumentalPreserved verifies that a cached instrumental Song
+// (Track.Instrumental=1) retains its recording attributes after decodeSong pairs
+// it with a live fallback track that carries only file-identity fields
+// (ArtistName/TrackName/AlbumName) but has Instrumental=0.
+//
+// This is a regression guard: song.Track = fallback would wipe Instrumental=1
+// and break the writer's `song.Track.Instrumental == 1` branch on cache hits.
+func TestDecodeSong_InstrumentalPreserved(t *testing.T) {
+	cached := models.Song{
+		Track: models.Track{
+			ArtistName:   "Cached Artist",
+			TrackName:    "Cached Title",
+			AlbumName:    "Cached Album",
+			Instrumental: 1,
+			HasLyrics:    0,
+			HasSubtitles: 0,
+			TrackLength:  240,
+		},
+	}
+	b, err := json.Marshal(cached)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	fallback := models.Track{
+		ArtistName:   "Live Artist",
+		TrackName:    "Live Title",
+		AlbumName:    "Live Album",
+		Instrumental: 0, // file tag does not carry this; must NOT overwrite cached value
+	}
+
+	got := decodeSong(string(b), fallback)
+
+	// Identity fields must come from the live file.
+	if got.Track.ArtistName != "Live Artist" {
+		t.Errorf("ArtistName = %q; want %q", got.Track.ArtistName, "Live Artist")
+	}
+	if got.Track.TrackName != "Live Title" {
+		t.Errorf("TrackName = %q; want %q", got.Track.TrackName, "Live Title")
+	}
+	if got.Track.AlbumName != "Live Album" {
+		t.Errorf("AlbumName = %q; want %q", got.Track.AlbumName, "Live Album")
+	}
+
+	// Recording attributes must come from the cached blob, not fallback.
+	if got.Track.Instrumental != 1 {
+		t.Errorf("Instrumental = %d; want 1 (must not be overwritten by fallback)", got.Track.Instrumental)
+	}
+	if got.Track.HasSubtitles != 0 {
+		t.Errorf("HasSubtitles = %d; want 0", got.Track.HasSubtitles)
+	}
+	if got.Track.TrackLength != 240 {
+		t.Errorf("TrackLength = %d; want 240", got.Track.TrackLength)
 	}
 }
 
