@@ -22,7 +22,7 @@ type PendingResultStore interface {
 type LyricsCache interface {
 	// Lookup checks the cache for (artist, title, durationBucket).
 	// Pass durationBucket=0 when the recording duration is not yet known.
-	Lookup(ctx context.Context, artist, title string, durationBucket int64) (string, error)
+	Lookup(ctx context.Context, artist, title string, durationBucket int) (string, error)
 }
 
 // WorkQueue enqueues durable lyrics work.

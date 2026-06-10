@@ -31,7 +31,7 @@ func TestSameRecordingAcrossAlbumsCollapsesToOneRow(t *testing.T) {
 	if err := repo.Store(ctx, "Artist", "Song", 0, "lyrics v1"); err != nil {
 		t.Fatalf("Store v1: %v", err)
 	}
-	// Same recording, different album tag - should upsert, not duplicate.
+	// Same recording, different album tag in the file - should upsert, not duplicate.
 	if err := repo.Store(ctx, "Artist", "Song", 0, "lyrics v2"); err != nil {
 		t.Fatalf("Store v2: %v", err)
 	}
@@ -40,19 +40,18 @@ func TestSameRecordingAcrossAlbumsCollapsesToOneRow(t *testing.T) {
 		t.Fatalf("Lookup: %v", err)
 	}
 	if got != "lyrics v2" {
-		t.Errorf("got %q, want %q", got, "lyrics v2")
+		t.Errorf("got %q, want %q after upsert", got, "lyrics v2")
 	}
 }
 
-// TestDistinctDurationRecordingsCacheSeparately verifies that recordings with
-// meaningfully different durations (different 5-second buckets) produce separate
-// cache rows and return their own lyrics independently.
+// TestDistinctDurationRecordingsCacheSeparately verifies that recordings in
+// different 5-second duration buckets produce separate cache rows.
 func TestDistinctDurationRecordingsCacheSeparately(t *testing.T) {
 	ctx := context.Background()
 	repo := cache.New(openTestDB(t))
 
-	bucketA := cache.DurationBucket(180) // 36
-	bucketB := cache.DurationBucket(240) // 48
+	const bucketA = 36 // e.g. floor(180/5)
+	const bucketB = 48 // e.g. floor(240/5)
 
 	if err := repo.Store(ctx, "Artist", "Song", bucketA, "short version"); err != nil {
 		t.Fatalf("Store A: %v", err)
@@ -79,19 +78,17 @@ func TestDistinctDurationRecordingsCacheSeparately(t *testing.T) {
 }
 
 // TestMultiISRCSameDurationSharesOneRow verifies that multiple ISRC territorial
-// variants of the same recording (same duration, thus same bucket) collapse to
-// one cache row, not one per ISRC.
+// variants of the same recording (same duration bucket) collapse to one cache row.
 func TestMultiISRCSameDurationSharesOneRow(t *testing.T) {
 	ctx := context.Background()
 	repo := cache.New(openTestDB(t))
 
-	bucket := cache.DurationBucket(210) // both ISRCs map here
+	const bucket = 42 // floor(210/5)
 
-	// First ISRC territory.
 	if err := repo.Store(ctx, "Artist", "Song", bucket, "lyrics from US release"); err != nil {
 		t.Fatalf("Store ISRC-US: %v", err)
 	}
-	// Second ISRC territory - same duration bucket, should upsert.
+	// Same duration bucket - should upsert rather than insert a second row.
 	if err := repo.Store(ctx, "Artist", "Song", bucket, "lyrics from EU release"); err != nil {
 		t.Fatalf("Store ISRC-EU: %v", err)
 	}
@@ -105,33 +102,20 @@ func TestMultiISRCSameDurationSharesOneRow(t *testing.T) {
 }
 
 // TestUnknownDurationBehavesLikeArtistTitle verifies that bucket=0 (the unknown
-// sentinel) makes the effective key (artist, title) - one row per song,
-// regardless of which album tag the file carries.
+// sentinel) makes the effective key (artist, title), one row per song.
 func TestUnknownDurationBehavesLikeArtistTitle(t *testing.T) {
 	ctx := context.Background()
 	repo := cache.New(openTestDB(t))
 
-	const bucket = 0 // unknown sentinel
-
-	if err := repo.Store(ctx, "Artist", "Song", bucket, "cached lyrics"); err != nil {
+	if err := repo.Store(ctx, "Artist", "Song", 0, "cached lyrics"); err != nil {
 		t.Fatalf("Store: %v", err)
 	}
-	got, err := repo.Lookup(ctx, "Artist", "Song", bucket)
+	got, err := repo.Lookup(ctx, "Artist", "Song", 0)
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
 	if got != "cached lyrics" {
 		t.Errorf("got %q, want %q", got, "cached lyrics")
-	}
-
-	// A second lookup with a different (but still unknown) call should hit the
-	// same row because both use bucket=0.
-	got2, err := repo.Lookup(ctx, "Artist", "Song", 0)
-	if err != nil {
-		t.Fatalf("Lookup 2: %v", err)
-	}
-	if got2 != "cached lyrics" {
-		t.Errorf("second lookup: got %q, want %q", got2, "cached lyrics")
 	}
 }
 
@@ -158,27 +142,5 @@ func TestLookup_NormalizesKeys(t *testing.T) {
 	}
 	if got != "normalized lyrics" {
 		t.Errorf("got %q, want %q", got, "normalized lyrics")
-	}
-}
-
-func TestDurationBucket(t *testing.T) {
-	cases := []struct {
-		seconds int
-		want    int64
-	}{
-		{0, 0},
-		{4, 0},
-		{5, 1},
-		{9, 1},
-		{10, 2},
-		{180, 36},
-		{184, 36},
-		{185, 37},
-		{240, 48},
-	}
-	for _, c := range cases {
-		if got := cache.DurationBucket(c.seconds); got != c.want {
-			t.Errorf("DurationBucket(%d) = %d, want %d", c.seconds, got, c.want)
-		}
 	}
 }

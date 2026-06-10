@@ -191,7 +191,7 @@ type fakeCache struct {
 	stores []cacheStore
 }
 
-func (c *fakeCache) Lookup(_ context.Context, _ string, _ string, _ int64) (string, error) {
+func (c *fakeCache) Lookup(_ context.Context, _ string, _ string, _ int) (string, error) {
 	if c.err != nil {
 		return "", c.err
 	}
@@ -201,7 +201,7 @@ func (c *fakeCache) Lookup(_ context.Context, _ string, _ string, _ int64) (stri
 	return c.hit, nil
 }
 
-func (c *fakeCache) Store(_ context.Context, artist, title string, _ int64, lyrics string) error {
+func (c *fakeCache) Store(_ context.Context, artist, title string, _ int, lyrics string) error {
 	c.stores = append(c.stores, cacheStore{artist: artist, title: title, lyrics: lyrics})
 	return nil
 }
@@ -1468,7 +1468,7 @@ type fakeCacheToggle struct {
 	idx     int
 }
 
-func (c *fakeCacheToggle) Lookup(_ context.Context, _ string, _ string, _ int64) (string, error) {
+func (c *fakeCacheToggle) Lookup(_ context.Context, _ string, _ string, _ int) (string, error) {
 	hit := false
 	if c.idx < len(c.hits) {
 		hit = c.hits[c.idx]
@@ -1480,7 +1480,7 @@ func (c *fakeCacheToggle) Lookup(_ context.Context, _ string, _ string, _ int64)
 	return "", sql.ErrNoRows
 }
 
-func (c *fakeCacheToggle) Store(context.Context, string, string, int64, string) error {
+func (c *fakeCacheToggle) Store(context.Context, string, string, int, string) error {
 	return nil
 }
 

@@ -48,8 +48,8 @@ type ScriptGuard interface {
 type Cache interface {
 	// Lookup returns cached lyrics for (artist, title, durationBucket).
 	// Use durationBucket=0 when the recording duration is unknown.
-	Lookup(ctx context.Context, artist, title string, durationBucket int64) (string, error)
-	Store(ctx context.Context, artist, title string, durationBucket int64, lyrics string) error
+	Lookup(ctx context.Context, artist, title string, durationBucket int) (string, error)
+	Store(ctx context.Context, artist, title string, durationBucket int, lyrics string) error
 }
 
 // defaultCircuitOpenDuration is the fallback window applied when no value
