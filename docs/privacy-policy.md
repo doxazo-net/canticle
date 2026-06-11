@@ -34,6 +34,15 @@ sent anywhere else.
 artist name to the PetitLyrics API. No credentials are required or transmitted
 for this provider.
 
+## Network metadata
+
+Like any application that makes internet requests, `mxlrcgo-svc` does not
+control what standard network metadata a remote server or intermediary receives.
+When the app contacts a lyrics provider, that provider - and any network
+intermediary on the path - inherently receives the request's source IP address
+alongside the query content. This is true of any internet request; it is not
+additional data the app chooses to send.
+
 ## Local cache
 
 **What stays local.** Lookup results are stored in a local SQLite database

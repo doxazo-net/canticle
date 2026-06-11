@@ -38,7 +38,8 @@ corresponds to the intended commit:
 
 Lookup data handling is described in the [Privacy Policy](privacy-policy.md).
 No personal data is transmitted to SignPath beyond what is required for the
-signing workflow.
+signing workflow. For details on what SignPath processes during signing, see the
+[SignPath Foundation Privacy Policy](https://signpath.org/privacy).
 
 ## Cross-references
 
