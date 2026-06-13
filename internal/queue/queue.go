@@ -101,11 +101,17 @@ type WorkItem struct {
 	// worker compares it against the current generation to invalidate cached
 	// results when the provider set changes. 0 means "no generation configured".
 	ProvidersVersion int
-	NextAttemptAt    time.Time
-	LastError        string
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
-	CompletedAt      *time.Time
+	// DetectInstrumental is the per-item instrumental-detection decision stamped
+	// onto the row at enqueue time (resolved CLI > per-library > global). Written
+	// only on the initial insert; the ON CONFLICT refresh and Defer/RecheckDeferred
+	// paths leave it unchanged. nil (NULL) means "no decision stamped" -> the worker
+	// falls back to the global config default, which covers all pre-existing rows.
+	DetectInstrumental *bool
+	NextAttemptAt      time.Time
+	LastError          string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	CompletedAt        *time.Time
 }
 
 // DBQueue is a SQLite-backed queue for durable lyrics work.
@@ -188,9 +194,9 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 
 	row := tx.QueryRowContext(ctx,
 		`INSERT INTO work_queue (
-             artist, title, album, album_artist, artist_key, title_key, outdir, filename, source_path, output_paths, scan_result_id, status, priority, providers_version, next_attempt_at
+             artist, title, album, album_artist, artist_key, title_key, outdir, filename, source_path, output_paths, scan_result_id, status, priority, providers_version, detect_instrumental, next_attempt_at
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(artist_key, title_key) DO UPDATE SET
              artist = CASE
                  WHEN work_queue.status IN ('done', 'processing') THEN work_queue.artist
@@ -251,7 +257,7 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
                  ELSE NULL
              END
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
 		inputs.Track.ArtistName,
 		inputs.Track.TrackName,
 		inputs.Track.AlbumName,
@@ -266,6 +272,7 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 		StatusPending,
 		priority,
 		q.providersVersion,
+		nullableBool(inputs.DetectInstrumental),
 		now,
 		refreshFailedBackoff,
 		refreshFailedBackoff,
@@ -304,7 +311,7 @@ const dequeueRandomizedSQL = `UPDATE work_queue
              LIMIT 1
          )
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`
 
 // dequeueDeterministicSQL claims the next ready item in stable FIFO order within
 // a priority tier (created_at, then id).
@@ -319,7 +326,7 @@ const dequeueDeterministicSQL = `UPDATE work_queue
              LIMIT 1
          )
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`
 
 // Dequeue atomically claims the next ready item and marks it processing.
 func (q *DBQueue) Dequeue(ctx context.Context) (WorkItem, error) {
@@ -461,7 +468,7 @@ func (q *DBQueue) Fail(ctx context.Context, id int64, cause error) (WorkItem, er
          WHERE id = ?
            AND status = 'processing'
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
 		nextAttempts,
 		nextAttemptAt,
 		lastError,
@@ -513,7 +520,7 @@ func (q *DBQueue) Defer(ctx context.Context, id int64, retryAfter time.Duration,
          WHERE id = ?
            AND status = 'processing'
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
 		nextAttemptAt,
 		lastError,
 		id,
@@ -565,7 +572,7 @@ func (q *DBQueue) RetireMiss(ctx context.Context, id int64) (WorkItem, error) {
          WHERE id = ?
            AND status = 'processing'
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
 		now,
 		missLimitReachedError,
 		id,
@@ -807,7 +814,7 @@ type ListFilter struct {
 // optionally filtered by status and capped by limit.
 func (q *DBQueue) List(ctx context.Context, filter ListFilter) (items []WorkItem, retErr error) {
 	const baseQuery = `SELECT id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                       miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id
+                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id
                        FROM work_queue`
 	const orderClause = ` ORDER BY priority DESC, created_at ASC, id ASC`
 	const limitClause = ` LIMIT ?`
@@ -872,7 +879,7 @@ func (q *DBQueue) Retry(ctx context.Context, id int64) (WorkItem, error) {
          WHERE id = ?
            AND status = 'failed'
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
 		now,
 		id,
 	)
@@ -1170,6 +1177,7 @@ func scanWorkItem(row rowScanner) (WorkItem, error) {
 	var nextAttemptAt, createdAt, updatedAt, outputPaths string
 	var completedAt sql.NullString
 	var scanResultID sql.NullInt64
+	var detectInstrumental sql.NullBool
 	err := row.Scan(
 		&item.ID,
 		&item.Inputs.Track.ArtistName,
@@ -1184,6 +1192,7 @@ func scanWorkItem(row rowScanner) (WorkItem, error) {
 		&item.Attempts,
 		&item.MissCount,
 		&item.ProvidersVersion,
+		&detectInstrumental,
 		&nextAttemptAt,
 		&item.LastError,
 		&createdAt,
@@ -1197,6 +1206,10 @@ func scanWorkItem(row rowScanner) (WorkItem, error) {
 	}
 	if scanResultID.Valid {
 		item.Inputs.ScanResultID = scanResultID.Int64
+	}
+	if detectInstrumental.Valid {
+		b := detectInstrumental.Bool
+		item.DetectInstrumental = &b
 	}
 	item.NextAttemptAt, err = parseTime(nextAttemptAt)
 	if err != nil {
@@ -1273,6 +1286,15 @@ func nullableID(id int64) any {
 		return nil
 	}
 	return id
+}
+
+// nullableBool maps a tri-state *bool to a SQL value: nil -> NULL, else the bool.
+// Used to stamp the per-item detect_instrumental decision (NULL = no decision).
+func nullableBool(b *bool) any {
+	if b == nil {
+		return nil
+	}
+	return *b
 }
 
 func requireAffected(res sql.Result, op string) error {

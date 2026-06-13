@@ -216,10 +216,11 @@ func TestConfigureWorkerGuardAcceptsNilGuard(t *testing.T) {
 	configureWorkerGuard(w, nil)
 }
 
-// TestNewAudioDetectorDisabledReturnsNil verifies that when
-// InstrumentalDetector.Enabled is false (the default), newAudioDetector returns
-// (nil, nil) and does not attempt to locate ffmpeg.
-func TestNewAudioDetectorDisabledReturnsNil(t *testing.T) {
+// TestNewAudioDetectorDecoupledFromEnableFlag verifies the #218 decoupling: the
+// detector is built whenever a classifier URL is configured, independent of the
+// global Enabled flag, and is nil only when no classifier URL is set.
+func TestNewAudioDetectorDecoupledFromEnableFlag(t *testing.T) {
+	// Enabled=false but no classifier URL -> nil (no classifier configured).
 	got, err := newAudioDetector(config.Config{
 		InstrumentalDetector: config.InstrumentalDetectorConfig{
 			Enabled:    false,
@@ -227,10 +228,34 @@ func TestNewAudioDetectorDisabledReturnsNil(t *testing.T) {
 		},
 	})
 	if err != nil {
-		t.Fatalf("newAudioDetector: %v", err)
+		t.Fatalf("newAudioDetector (no URL): %v", err)
 	}
 	if got != nil {
-		t.Fatalf("newAudioDetector = %#v; want nil (disabled)", got)
+		t.Fatalf("newAudioDetector (no URL) = %#v; want nil", got)
+	}
+
+	// Enabled=false but a classifier URL IS set -> detector still built (decoupled).
+	// Point FFmpegPath at a stub executable so construction does not depend on a
+	// real ffmpeg being on PATH (CI runners do not have one).
+	stubFFmpeg := filepath.Join(t.TempDir(), "ffmpeg")
+	if err := os.WriteFile(stubFFmpeg, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write stub ffmpeg: %v", err)
+	}
+	got, err = newAudioDetector(config.Config{
+		InstrumentalDetector: config.InstrumentalDetectorConfig{
+			Enabled:               false,
+			ClassifierURL:         "http://yamnet:8080",
+			FFmpegPath:            stubFFmpeg,
+			SampleDurationSeconds: 30,
+			MinConfidence:         0.90,
+			InstrumentalClasses:   []string{"Music"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("newAudioDetector (URL set, Enabled=false): %v", err)
+	}
+	if got == nil {
+		t.Fatal("newAudioDetector (URL set, Enabled=false) = nil; want a detector (decoupled from Enabled)")
 	}
 }
 
@@ -253,10 +278,13 @@ func TestNewAudioDetectorEnabledWithoutFFmpegErrors(t *testing.T) {
 	}
 }
 
-// TestNewAudioDetectorEnabledWithoutClassifierURLErrors verifies that enabling
-// the detector with a blank classifier URL returns an error.
-func TestNewAudioDetectorEnabledWithoutClassifierURLErrors(t *testing.T) {
-	_, err := newAudioDetector(config.Config{
+// TestNewAudioDetectorBlankClassifierURLReturnsNil verifies that a blank classifier
+// URL yields no detector (nil, nil) even when the global flag is enabled. Detector
+// construction is decoupled from the enable flag (#218); a row that requests
+// detection without a configured classifier is loud-skipped by the worker at
+// runtime rather than failing detector construction.
+func TestNewAudioDetectorBlankClassifierURLReturnsNil(t *testing.T) {
+	d, err := newAudioDetector(config.Config{
 		InstrumentalDetector: config.InstrumentalDetectorConfig{
 			Enabled:               true,
 			ClassifierURL:         "", // blank
@@ -265,8 +293,11 @@ func TestNewAudioDetectorEnabledWithoutClassifierURLErrors(t *testing.T) {
 			InstrumentalClasses:   []string{"Music"},
 		},
 	})
-	if err == nil {
-		t.Fatal("newAudioDetector with blank ClassifierURL returned nil error; want error")
+	if err != nil {
+		t.Fatalf("newAudioDetector with blank ClassifierURL returned error %v; want nil", err)
+	}
+	if d != nil {
+		t.Fatal("newAudioDetector with blank ClassifierURL returned a detector; want nil (no classifier configured)")
 	}
 }
 
@@ -437,7 +468,7 @@ func TestSchedulerBuildsScanEnqueuer(t *testing.T) {
 		t.Fatalf("Upsert scan result: %v", err)
 	}
 
-	got := scheduler(sqlDB, scanner.ScanOptions{MaxDepth: 7})
+	got := scheduler(sqlDB, scanner.ScanOptions{MaxDepth: 7}, nil, false)
 	if got.OnScanComplete == nil {
 		t.Fatal("scheduler OnScanComplete = nil; want enqueue callback")
 	}

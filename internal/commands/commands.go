@@ -106,15 +106,17 @@ type ServeCmd struct {
 // nested inspection subcommands (results, clear). When neither nested
 // subcommand is set, the legacy run-once scan path is taken.
 type ScanCmd struct {
-	ConfigPath     string   `arg:"--config" help:"path to config file (default: XDG)" default:""`
-	Depth          int      `arg:"-d,--depth" help:"maximum recursion depth" default:"100"`
-	Update         bool     `arg:"-u,--update" help:"re-fetch and overwrite existing .lrc files"`
-	Upgrade        bool     `arg:"--upgrade" help:"re-fetch .txt lyrics to promote them"`
-	BFS            bool     `arg:"--bfs" help:"use breadth-first traversal"`
-	EmbeddedLyrics *string  `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off)"`
-	Enrich         bool     `arg:"--enrich" help:"force recording enrichment (ISRC/MBID/duration) on for this scan, overriding per-library and global settings; mutually exclusive with --no-enrich"`
-	NoEnrich       bool     `arg:"--no-enrich" help:"force recording enrichment off for this scan, overriding per-library and global settings; mutually exclusive with --enrich"`
-	Libraries      []string `arg:"--only,separate" help:"limit scan to named or numeric libraries; repeat to select more than one. Distinct from subcommand --library flags (which target a single library row)"`
+	ConfigPath           string   `arg:"--config" help:"path to config file (default: XDG)" default:""`
+	Depth                int      `arg:"-d,--depth" help:"maximum recursion depth" default:"100"`
+	Update               bool     `arg:"-u,--update" help:"re-fetch and overwrite existing .lrc files"`
+	Upgrade              bool     `arg:"--upgrade" help:"re-fetch .txt lyrics to promote them"`
+	BFS                  bool     `arg:"--bfs" help:"use breadth-first traversal"`
+	EmbeddedLyrics       *string  `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off)"`
+	Enrich               bool     `arg:"--enrich" help:"force recording enrichment (ISRC/MBID/duration) on for this scan, overriding per-library and global settings; mutually exclusive with --no-enrich"`
+	NoEnrich             bool     `arg:"--no-enrich" help:"force recording enrichment off for this scan, overriding per-library and global settings; mutually exclusive with --enrich"`
+	DetectInstrumental   bool     `arg:"--detect-instrumental" help:"force instrumental detection on for tracks enqueued by this scan, overriding per-library and global settings; mutually exclusive with --no-detect-instrumental"`
+	NoDetectInstrumental bool     `arg:"--no-detect-instrumental" help:"force instrumental detection off for tracks enqueued by this scan, overriding per-library and global settings; mutually exclusive with --detect-instrumental"`
+	Libraries            []string `arg:"--only,separate" help:"limit scan to named or numeric libraries; repeat to select more than one. Distinct from subcommand --library flags (which target a single library row)"`
 
 	Results *ScanResultsCmd `arg:"subcommand:results" help:"list persisted scan_results rows"`
 	Clear   *ScanClearCmd   `arg:"subcommand:clear" help:"delete persisted scan_results rows for a library"`
@@ -667,6 +669,7 @@ func runServe(ctx context.Context, args ServeCmd, newFetcher func(string) musixm
 		return 1
 	}
 	configureWorkerAudioDetector(w, audioDetector)
+	w.SetInstrumentalDetectionDefault(cfg.InstrumentalDetector.Enabled)
 	configureWorkerGuard(w, newGuard(cfg))
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -882,11 +885,14 @@ func configureWorkerVerification(w *worker.Worker, cfg config.Config, verifier v
 	w.EnableVerification(verifier, cfg.Verification.MinConfidence)
 }
 
-// newAudioDetector builds the instrumental detector from config. Returns (nil, nil)
-// when the detector is disabled (the default). Callers must treat a nil return as
-// the disabled/no-op state.
+// newAudioDetector builds the instrumental detector from config. It is built
+// whenever a classifier URL is configured - decoupled from the global enable flag
+// (#218) so per-library detection works even when the global default is off. The
+// global default and per-item decisions gate whether the worker actually calls it.
+// Returns (nil, nil) when no classifier URL is set; callers treat a nil return as
+// "no classifier configured".
 func newAudioDetector(cfg config.Config) (detector.Detector, error) {
-	if !cfg.InstrumentalDetector.Enabled {
+	if strings.TrimSpace(cfg.InstrumentalDetector.ClassifierURL) == "" {
 		return nil, nil
 	}
 	return detector.NewHTTPDetector(
@@ -938,13 +944,15 @@ func configureWriterBilingual(w lyrics.Writer, cfg config.Config) {
 }
 
 func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args ServeCmd) {
+	// serve has no per-run detect override; resolve per library against the global
+	// default (and the per-library setting) at enqueue time.
 	s := scheduler(sqlDB, scanner.ScanOptions{
 		Update:         args.Update,
 		Upgrade:        args.Upgrade,
 		MaxDepth:       args.Depth,
 		BFS:            args.BFS,
 		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
-	})
+	}, nil, cfg.InstrumentalDetector.Enabled)
 	// serve has no per-run enrichment override; resolve per library against the
 	// global default (and the per-library setting) inside the scheduler.
 	s.GlobalEnrichDefault = cfg.Enrichment.Enabled
@@ -964,7 +972,7 @@ func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watc
 		MaxDepth:       args.Depth,
 		BFS:            args.BFS,
 		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
-	})
+	}, nil, cfg.InstrumentalDetector.Enabled)
 	sched.GlobalEnrichDefault = cfg.Enrichment.Enabled
 	wch := watcher.New(watchCfg, library.New(sqlDB), func(ctx context.Context, lib models.Library, path string) error {
 		return sched.RunOnceForPath(ctx, lib, path)
@@ -1033,18 +1041,23 @@ func runScan(ctx context.Context, out io.Writer, args ScanCmd) int {
 	}
 	defer sqlDB.Close() //nolint:errcheck // best-effort close on shutdown
 
+	enrichOverride, err := resolveEnrichOverride(args.Enrich, args.NoEnrich)
+	if err != nil {
+		_, _ = fmt.Fprintln(out, err)
+		return 1
+	}
+	detectOverride, err := resolveDetectOverride(args.DetectInstrumental, args.NoDetectInstrumental)
+	if err != nil {
+		_, _ = fmt.Fprintln(out, err)
+		return 1
+	}
 	s := scheduler(sqlDB, scanner.ScanOptions{
 		Update:         args.Update,
 		Upgrade:        args.Upgrade,
 		MaxDepth:       args.Depth,
 		BFS:            args.BFS,
 		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
-	})
-	enrichOverride, err := resolveEnrichOverride(args.Enrich, args.NoEnrich)
-	if err != nil {
-		_, _ = fmt.Fprintln(out, err)
-		return 1
-	}
+	}, detectOverride, cfg.InstrumentalDetector.Enabled)
 	s.EnrichOverride = enrichOverride
 	s.GlobalEnrichDefault = cfg.Enrichment.Enabled
 	if len(args.Libraries) > 0 {
@@ -1093,18 +1106,18 @@ func embeddedLyricsMode(flag *string, cfgVal string) string {
 	}
 }
 
-// resolveEnrichOverride converts the mutually-exclusive scan --enrich/--no-enrich
-// flags into a tri-state override for recording enrichment: nil = no override
-// (fall back to per-library then global), &true = force on, &false = force off.
-// Passing both flags is a usage error.
-func resolveEnrichOverride(enrich, noEnrich bool) (*bool, error) {
+// resolveFlagOverride converts a mutually-exclusive on/off bool flag pair into a
+// tri-state override: nil = no override (fall back to per-library then global),
+// &true = force on, &false = force off. label names the flag pair for the
+// conflict error. Passing both flags is a usage error.
+func resolveFlagOverride(on, off bool, label string) (*bool, error) {
 	switch {
-	case enrich && noEnrich:
-		return nil, fmt.Errorf("--enrich and --no-enrich are mutually exclusive")
-	case enrich:
+	case on && off:
+		return nil, fmt.Errorf("%s are mutually exclusive", label)
+	case on:
 		v := true
 		return &v, nil
-	case noEnrich:
+	case off:
 		v := false
 		return &v, nil
 	default:
@@ -1112,13 +1125,26 @@ func resolveEnrichOverride(enrich, noEnrich bool) (*bool, error) {
 	}
 }
 
-func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions) scan.Scheduler {
+// resolveEnrichOverride resolves the scan --enrich/--no-enrich override (#217).
+func resolveEnrichOverride(enrich, noEnrich bool) (*bool, error) {
+	return resolveFlagOverride(enrich, noEnrich, "--enrich and --no-enrich")
+}
+
+// resolveDetectOverride resolves the scan --detect-instrumental/--no-detect-instrumental
+// override (#218).
+func resolveDetectOverride(detect, noDetect bool) (*bool, error) {
+	return resolveFlagOverride(detect, noDetect, "--detect-instrumental and --no-detect-instrumental")
+}
+
+func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, globalDetectDefault bool) scan.Scheduler {
 	results := scan.New(sqlDB)
 	enq := scan.Enqueuer{
-		Results:  results,
-		Cache:    cache.New(sqlDB),
-		Queue:    queue.NewDBQueue(sqlDB),
-		Priority: queue.PriorityScan,
+		Results:             results,
+		Cache:               cache.New(sqlDB),
+		Queue:               queue.NewDBQueue(sqlDB),
+		Priority:            queue.PriorityScan,
+		DetectOverride:      detectOverride,
+		GlobalDetectDefault: globalDetectDefault,
 	}
 	return scan.Scheduler{
 		Libraries: library.New(sqlDB),
@@ -1126,7 +1152,7 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions) scan.Scheduler {
 		Scanner:   scanner.NewScanner(),
 		Options:   opts,
 		OnScanComplete: func(ctx context.Context, lib models.Library, found []models.ScanResult) error {
-			enqueued, cacheHits, err := enq.EnqueuePending(ctx, lib.ID)
+			enqueued, cacheHits, err := enq.EnqueuePending(ctx, lib)
 			if err != nil {
 				// Counts are partial on an aborted enqueue; don't log "complete".
 				slog.Warn("scheduled scan incomplete (enqueue aborted)",
