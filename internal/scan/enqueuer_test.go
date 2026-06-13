@@ -122,7 +122,7 @@ func TestEnqueuer_EnqueuePendingSkipsCacheHitsAndEnqueuesMisses(t *testing.T) {
 	work := &fakeWorkQueue{}
 	e := scan.Enqueuer{Results: store, Cache: cache, Queue: work, Priority: 5}
 
-	enqueued, cacheHits, err := e.EnqueuePending(ctx, 7)
+	enqueued, cacheHits, err := e.EnqueuePending(ctx, models.Library{ID: 7})
 	if err != nil {
 		t.Fatalf("EnqueuePending: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestEnqueuer_ReservesMissBeforeEnqueue(t *testing.T) {
 	}}
 	e := scan.Enqueuer{Results: store, Cache: cache, Queue: work}
 
-	if _, _, err := e.EnqueuePending(ctx, 7); err != nil {
+	if _, _, err := e.EnqueuePending(ctx, models.Library{ID: 7}); err != nil {
 		t.Fatalf("EnqueuePending: %v", err)
 	}
 	if !reservedBeforeEnqueue {
@@ -190,7 +190,7 @@ func TestEnqueuer_RestoresPendingWhenEnqueueFails(t *testing.T) {
 	work := &fakeWorkQueue{err: queueErr}
 	e := scan.Enqueuer{Results: store, Cache: cache, Queue: work}
 
-	_, _, err := e.EnqueuePending(ctx, 7)
+	_, _, err := e.EnqueuePending(ctx, models.Library{ID: 7})
 	if !errors.Is(err, queueErr) {
 		t.Fatalf("EnqueuePending error = %v; want wrapping %v", err, queueErr)
 	}
@@ -212,7 +212,7 @@ func TestEnqueuer_RestoresPendingWhenScanResultDestinationInvalid(t *testing.T) 
 	work := &fakeWorkQueue{}
 	e := scan.Enqueuer{Results: store, Cache: cache, Queue: work}
 
-	_, _, err := e.EnqueuePending(ctx, 7)
+	_, _, err := e.EnqueuePending(ctx, models.Library{ID: 7})
 	if err == nil {
 		t.Fatal("EnqueuePending returned nil error; want invalid destination error")
 	}
@@ -279,7 +279,7 @@ func TestEnqueuer_PropagatesCacheAndQueueErrors(t *testing.T) {
 		t.Run(v.name, func(t *testing.T) {
 			store := &fakePendingStore{results: results}
 			e := scan.Enqueuer{Results: store, Cache: v.cache, Queue: v.queue}
-			_, _, err := e.EnqueuePending(ctx, 1)
+			_, _, err := e.EnqueuePending(ctx, models.Library{ID: 1})
 			if !errors.Is(err, v.want) {
 				t.Fatalf("EnqueuePending error = %v; want wrapping %v", err, v.want)
 			}

@@ -102,10 +102,16 @@ type Worker struct {
 	verifier              verification.Verifier
 	verifyBelowConfidence float64
 	// audioDetector, when non-nil, is invoked on provider misses to detect
-	// instrumental tracks via an external AudioSet classifier sidecar. It is
-	// optional (nil means disabled) and errors from it are non-fatal (the miss
-	// path continues normally). Enabled via EnableAudioDetector.
+	// instrumental tracks via an external AudioSet classifier sidecar. It is built
+	// whenever a classifier URL is configured (decoupled from the global enable
+	// flag) so per-library detection works even with the global default off. Errors
+	// from it are non-fatal (the miss path continues normally). Set via
+	// EnableAudioDetector.
 	audioDetector detector.Detector
+	// detectInstrumentalDefault is the global config default for instrumental
+	// detection, used to resolve work items whose per-item decision is nil (NULL in
+	// the DB, e.g. pre-existing rows). Set via SetInstrumentalDetectionDefault.
+	detectInstrumentalDefault bool
 	// scriptGuard, when non-nil and Enabled, rejects fetched lyrics whose script
 	// mix falls outside the configured allowlist. Named scriptGuard (not guard)
 	// to avoid colliding with the guardReject helper. Default nil (no guard).
@@ -392,6 +398,13 @@ func (w *Worker) EnableVerification(verifier verification.Verifier, belowConfide
 // so the worker keeps no copy of it.
 func (w *Worker) EnableAudioDetector(d detector.Detector) {
 	w.audioDetector = d
+}
+
+// SetInstrumentalDetectionDefault sets the global default used to resolve work
+// items whose per-item detect decision is nil (NULL). It mirrors
+// config.InstrumentalDetector.Enabled.
+func (w *Worker) SetInstrumentalDetectionDefault(enabled bool) {
+	w.detectInstrumentalDefault = enabled
 }
 
 // EnableGuard configures the language/script guard used to reject lyric
@@ -689,12 +702,28 @@ func (w *Worker) verify(ctx context.Context, item queue.WorkItem, song models.So
 	return nil
 }
 
-// detectInstrumental invokes the audio detector on the item's source path.
-// It returns (false, nil) when the detector is disabled or the source path is
-// absent. Any detector error is returned non-fatally: the caller logs a warning
-// and falls through to normal miss handling.
+// detectInstrumental invokes the audio detector on the item's source path when
+// instrumental detection is enabled for this item. The decision is resolved from
+// the per-item stamp (item.DetectInstrumental) falling back to the global default
+// when nil (NULL rows). It returns (false, nil) when detection is off for the
+// item or the source path is absent. When an item requests detection but no
+// classifier is configured, it logs an error and proceeds without detection
+// (loud-skip, never a silent no-op). Any detector error is returned non-fatally:
+// the caller logs a warning and falls through to normal miss handling.
 func (w *Worker) detectInstrumental(ctx context.Context, item queue.WorkItem) (bool, error) {
-	if w.audioDetector == nil || strings.TrimSpace(item.Inputs.SourcePath) == "" {
+	detect := w.detectInstrumentalDefault
+	if item.DetectInstrumental != nil {
+		detect = *item.DetectInstrumental
+	}
+	if !detect {
+		return false, nil
+	}
+	if w.audioDetector == nil {
+		slog.Error("instrumental detection requested for item but no classifier is configured; skipping detection",
+			"id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName)
+		return false, nil
+	}
+	if strings.TrimSpace(item.Inputs.SourcePath) == "" {
 		return false, nil
 	}
 	res, err := w.audioDetector.Detect(ctx, item.Inputs.SourcePath)

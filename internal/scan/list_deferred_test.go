@@ -33,7 +33,7 @@ func TestRepo_ListDeferred(t *testing.T) {
 	// Enqueue the pending row (creates the work_queue + junction link), then
 	// dequeue and Defer it so the linked work_queue row is in 'deferred' state.
 	enq := scan.Enqueuer{Results: repo, Cache: cache.New(sqlDB), Queue: queue.NewDBQueue(sqlDB), Priority: queue.PriorityScan}
-	if _, _, err := enq.EnqueuePending(ctx, lib.ID); err != nil {
+	if _, _, err := enq.EnqueuePending(ctx, lib); err != nil {
 		t.Fatalf("enqueue pending: %v", err)
 	}
 	q := queue.NewDBQueue(sqlDB)

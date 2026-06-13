@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sydlexius/mxlrcgo-svc/internal/config"
 	"github.com/sydlexius/mxlrcgo-svc/internal/models"
 	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
 )
@@ -36,13 +37,21 @@ type Enqueuer struct {
 	Cache    LyricsCache
 	Queue    WorkQueue
 	Priority int
+	// DetectOverride is the scan-CLI override for instrumental detection
+	// (--detect-instrumental/--no-detect-instrumental); nil means no override.
+	// GlobalDetectDefault is the global config default used when neither the
+	// override nor the per-library setting is set. EnqueuePending resolves the
+	// per-item decision from these via config.ResolveBool and stamps it onto each
+	// enqueued item (stamp-on-insert; the worker reads it back later).
+	DetectOverride      *bool
+	GlobalDetectDefault bool
 }
 
 // EnqueuePending reads pending scan results for libraryID, skips cache hits,
 // and enqueues cache misses for worker processing. It returns the number of
 // rows enqueued and the number short-circuited as cache hits so callers can log
 // a per-scan summary; on error the partial counts so far are returned alongside.
-func (e *Enqueuer) EnqueuePending(ctx context.Context, libraryID int64) (enqueued, cacheHits int, retErr error) {
+func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqueued, cacheHits int, retErr error) {
 	if e.Results == nil {
 		return 0, 0, fmt.Errorf("scan: enqueuer results dependency is nil")
 	}
@@ -55,6 +64,12 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, libraryID int64) (enqueue
 	if err := ctx.Err(); err != nil {
 		return 0, 0, err
 	}
+
+	// Resolve the per-library instrumental-detection decision once (CLI override >
+	// per-library setting > global default) and stamp it onto every item enqueued
+	// for this library; the worker reads it back at fetch time.
+	detect := config.ResolveBool(e.DetectOverride, lib.DetectInstrumental, e.GlobalDetectDefault)
+	libraryID := lib.ID
 
 	results, err := e.Results.ListPendingByLibrary(ctx, libraryID)
 	if err != nil {
@@ -89,6 +104,7 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, libraryID int64) (enqueue
 			}
 			return enqueued, cacheHits, fmt.Errorf("scan: build inputs for result %d: %w", res.ID, err)
 		}
+		inputs.DetectInstrumental = &detect
 		if _, err := e.Queue.Enqueue(ctx, inputs, e.Priority); err != nil {
 			if restoreErr := e.Results.SetStatus(ctx, []int64{res.ID}, StatusPending); restoreErr != nil {
 				return enqueued, cacheHits, fmt.Errorf("scan: enqueue result %d: %w; restore pending: %w", res.ID, err, restoreErr)
@@ -102,7 +118,7 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, libraryID int64) (enqueue
 
 // OnScanComplete adapts EnqueuePending to Scheduler.OnScanComplete.
 func (e *Enqueuer) OnScanComplete(ctx context.Context, lib models.Library, _ []models.ScanResult) error {
-	_, _, err := e.EnqueuePending(ctx, lib.ID)
+	_, _, err := e.EnqueuePending(ctx, lib)
 	return err
 }
 

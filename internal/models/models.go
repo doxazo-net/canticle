@@ -68,6 +68,12 @@ type Inputs struct {
 	// ScanResultID links this work item back to its originating scan_results row.
 	// Zero means the item did not originate from a library scan (e.g. ad-hoc fetch).
 	ScanResultID int64
+	// DetectInstrumental carries the per-item instrumental-detection decision
+	// resolved at enqueue time (CLI > per-library > global). It is stamped onto the
+	// work_queue row on initial insert. nil means "no decision" -> the worker falls
+	// back to the global config default. Set by the scan enqueuer; other enqueue
+	// paths (e.g. webhook) leave it nil.
+	DetectInstrumental *bool
 }
 
 // OutputPath represents one lyrics output destination.

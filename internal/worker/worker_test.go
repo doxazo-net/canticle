@@ -1803,6 +1803,7 @@ func TestRunOnceDetectorInstrumentalWritesMarkerAndCompletes(t *testing.T) {
 
 	w := New(q, c, fetcher, writer)
 	w.EnableAudioDetector(det)
+	w.SetInstrumentalDetectionDefault(true)
 
 	if err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -1860,6 +1861,7 @@ func TestRunOnceDetectorReturnsFalseDefersNormally(t *testing.T) {
 
 	w := New(q, c, fetcher, writer)
 	w.EnableAudioDetector(det)
+	w.SetInstrumentalDetectionDefault(true)
 
 	if err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -1904,6 +1906,7 @@ func TestRunOnceDetectorErrorTreatsAsMiss(t *testing.T) {
 
 	w := New(q, c, fetcher, writer)
 	w.EnableAudioDetector(det)
+	w.SetInstrumentalDetectionDefault(true)
 
 	if err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -1945,6 +1948,7 @@ func TestRunOnceDetectorDisabledWhenNilSourcePath(t *testing.T) {
 
 	w := New(q, c, fetcher, writer)
 	w.EnableAudioDetector(det)
+	w.SetInstrumentalDetectionDefault(true)
 
 	if err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -1981,6 +1985,7 @@ func TestRunOnceDetectorInstrumentalWriteErrorDefersAsMiss(t *testing.T) {
 
 	w := New(q, c, fetcher, writer)
 	w.EnableAudioDetector(det)
+	w.SetInstrumentalDetectionDefault(true)
 
 	if err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
@@ -2022,6 +2027,7 @@ func TestRunOnceDetectorNotCalledOnSuccess(t *testing.T) {
 
 	w := New(q, c, fetcher, writer)
 	w.EnableAudioDetector(det)
+	w.SetInstrumentalDetectionDefault(true)
 
 	if err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)

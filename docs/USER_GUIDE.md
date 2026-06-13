@@ -204,6 +204,18 @@ You can control it at three levels, resolved with the precedence **CLI flag > pe
 
 When enrichment is off for a track, the scanner skips ISRC, MBID, and duration extraction as a unit, and the track keeps the `duration_bucket = 0` cache fallback (no behavior regression). A per-library or global change only affects scans run after the change; it does not restamp already-scanned rows.
 
+## Instrumental detection
+
+The optional instrumental-detection sidecar samples each track's audio with ffmpeg and asks an external classifier whether it is instrumental, writing an instrumental marker on a provider miss. It runs only when a classifier URL is configured (`[instrumental_detector] classifier_url`). Because it costs an ffmpeg sample plus an inference call per track, you may want it on a small curated or soundtrack-heavy library but off on a large bulk one.
+
+You control it at three levels, resolved with the precedence **CLI flag > per-library setting > global default**:
+
+- **Global default** (`config.toml`): `[instrumental_detector] enabled` (env `MXLRC_INSTRUMENTAL_DETECTOR_ENABLED`). Default `false`.
+- **Per library**: `mxlrcgo-svc library add/update --detect-instrumental` (force on) or `--detect-instrumental=false` (force off). Omit the flag to inherit the global default.
+- **Per run**: `mxlrcgo-svc scan --detect-instrumental` or `--no-detect-instrumental` overrides both for the tracks enqueued by that scan (the two flags are mutually exclusive). serve has no per-run flag; it resolves per library against the global default.
+
+The decision is resolved and stamped onto each work-queue item when it is enqueued (like the provider-set version), so a per-library or global change only affects tracks enqueued after the change. Tracks queued before per-library detection existed carry no decision and fall back to the global default at processing time. If an item requests detection but no `classifier_url` is configured, the worker logs an error and proceeds without detection (it never silently skips).
+
 ## Filesystem watcher (optional, low-latency scans)
 
 By default, `serve` only scans on the scheduler's tick (`--scan-interval`, default 900s), so a new track dropped into the library waits up to that interval before lyrics are fetched. An optional filesystem watcher reacts within seconds for the common single-host case. It is disabled by default and configured entirely through environment variables:
