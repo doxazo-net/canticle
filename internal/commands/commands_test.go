@@ -235,11 +235,17 @@ func TestNewAudioDetectorDecoupledFromEnableFlag(t *testing.T) {
 	}
 
 	// Enabled=false but a classifier URL IS set -> detector still built (decoupled).
+	// Point FFmpegPath at a stub executable so construction does not depend on a
+	// real ffmpeg being on PATH (CI runners do not have one).
+	stubFFmpeg := filepath.Join(t.TempDir(), "ffmpeg")
+	if err := os.WriteFile(stubFFmpeg, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write stub ffmpeg: %v", err)
+	}
 	got, err = newAudioDetector(config.Config{
 		InstrumentalDetector: config.InstrumentalDetectorConfig{
 			Enabled:               false,
 			ClassifierURL:         "http://yamnet:8080",
-			FFmpegPath:            "ffmpeg",
+			FFmpegPath:            stubFFmpeg,
 			SampleDurationSeconds: 30,
 			MinConfidence:         0.90,
 			InstrumentalClasses:   []string{"Music"},
