@@ -958,7 +958,7 @@ func (q *DBQueue) CountFailuresByReason(ctx context.Context) (map[string]int64, 
 		`SELECT COALESCE(NULLIF(last_error, ''), 'unknown') AS reason, COUNT(*)
          FROM work_queue
          WHERE status = 'failed'
-         GROUP BY last_error`,
+         GROUP BY reason`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("queue: count failures by reason: %w", err)
