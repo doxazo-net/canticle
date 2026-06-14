@@ -37,6 +37,35 @@ func TestSQLStoreRoundTrip(t *testing.T) {
 	}
 }
 
+func TestNewSQLStoreCopiesKey(t *testing.T) {
+	ctx := context.Background()
+	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "secrets.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	key := testKey(t)
+	store := NewSQLStore(sqlDB, key)
+
+	// Zero the caller's original key slice after construction. If the store held
+	// the slice by reference, this would corrupt its key and break the round-trip.
+	for i := range key {
+		key[i] = 0
+	}
+
+	if err := store.Set(ctx, "k", "plain-value"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	got, ok, err := store.Get(ctx, "k")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !ok || got != "plain-value" {
+		t.Fatalf("Get = (%q, %v), want (%q, true); store key not independent of caller slice", got, ok, "plain-value")
+	}
+}
+
 func TestSQLStoreCiphertextNotPlaintext(t *testing.T) {
 	ctx := context.Background()
 	store, sqlDB := newTestStore(t)

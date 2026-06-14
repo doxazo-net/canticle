@@ -25,9 +25,13 @@ type SQLStore struct {
 }
 
 // NewSQLStore returns a SQL-backed secret store using key for AES-256-GCM. key
-// must be 32 bytes; an invalid key surfaces at Set/Get time.
+// must be 32 bytes; an invalid key surfaces at Set/Get time. The key is copied
+// internally, so a later mutation or zeroing of the caller's slice does not
+// affect the store's effective key.
 func NewSQLStore(db *sql.DB, key []byte) *SQLStore {
-	return &SQLStore{db: db, key: key}
+	keyCopy := make([]byte, len(key))
+	copy(keyCopy, key)
+	return &SQLStore{db: db, key: keyCopy}
 }
 
 // Set encrypts plaintext and upserts it under name, refreshing updated_at.
