@@ -50,6 +50,7 @@ type Args struct {
 	Scan       *ScanCmd       `arg:"subcommand:scan" help:"scan configured libraries and enqueue missing lyrics"`
 	Library    *LibraryCmd    `arg:"subcommand:library" help:"manage library roots"`
 	Keys       *KeysCmd       `arg:"subcommand:keys" help:"manage API keys"`
+	Secrets    *SecretsCmd    `arg:"subcommand:secrets" help:"manage encrypted-at-rest secrets"`
 	Config     *ConfigCmd     `arg:"subcommand:config" help:"inspect or update configuration"`
 	Queue      *QueueCmd      `arg:"subcommand:queue" help:"inspect or maintain the durable work queue"`
 	Completion *CompletionCmd `arg:"subcommand:completion" help:"output a shell completion script (bash, zsh, or fish)"`
@@ -256,6 +257,34 @@ type KeysRevokeCmd struct {
 	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
+// SecretsCmd contains nested encrypted-secret-store subcommands.
+type SecretsCmd struct {
+	Import *SecretsImportCmd `arg:"subcommand:import" help:"encrypt the current effective secret(s) into the DB store"`
+	Set    *SecretsSetCmd    `arg:"subcommand:set" help:"set one secret by name from stdin (never on argv)"`
+	List   *SecretsListCmd   `arg:"subcommand:list" help:"list stored secret names and updated_at (never values)"`
+}
+
+// SecretsImportCmd encrypts the currently effective plaintext secret(s) into the
+// DB store, resolving the normal precedence but skipping the DB tier as a source.
+type SecretsImportCmd struct {
+	Token      bool   `arg:"--token" help:"import only the Musixmatch token"`
+	Webhook    bool   `arg:"--webhook" help:"import only the webhook API key"`
+	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
+}
+
+// SecretsSetCmd sets one secret by name. The value is read from stdin (prompt or
+// pipe), never from argv, since argv lands in shell history and ps.
+type SecretsSetCmd struct {
+	Name       string `arg:"positional,required" help:"secret name: musixmatch_token or webhook_api_key"`
+	Value      string `arg:"positional" help:"DO NOT pass the value here; it is rejected (use stdin)"`
+	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
+}
+
+// SecretsListCmd lists stored secret names and their updated_at, never values.
+type SecretsListCmd struct {
+	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
+}
+
 // ConfigCmd contains nested config subcommands.
 type ConfigCmd struct {
 	Get  *ConfigGetCmd  `arg:"subcommand:get" help:"get a config value"`
@@ -372,6 +401,8 @@ func Run(ctx context.Context, rawArgs []string, out io.Writer, deps Deps) int {
 		return runLibrary(ctx, out, *args.Library)
 	case args.Keys != nil:
 		return runKeys(ctx, out, *args.Keys)
+	case args.Secrets != nil:
+		return runSecrets(ctx, out, *args.Secrets)
 	case args.Config != nil:
 		return runConfig(out, *args.Config)
 	case args.Queue != nil:
@@ -392,7 +423,7 @@ func usesSubcommand(rawArgs []string) bool {
 		return true
 	}
 	commands := map[string]bool{
-		"fetch": true, "serve": true, "scan": true, "library": true, "keys": true, "config": true, "queue": true, "completion": true,
+		"fetch": true, "serve": true, "scan": true, "library": true, "keys": true, "secrets": true, "config": true, "queue": true, "completion": true,
 	}
 	return commands[rawArgs[0]]
 }

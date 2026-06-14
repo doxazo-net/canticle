@@ -16,13 +16,25 @@ const (
 	NameWebhookAPIKey = "webhook_api_key" //nolint:gosec // G101: this is a stable secret-store row name (a lookup key), not a hardcoded credential value
 )
 
+// SecretInfo is the non-sensitive metadata for one stored secret. It carries the
+// name and its last-write timestamp only; it never carries the value (plaintext
+// or ciphertext), so it is safe to print in `secrets list`.
+type SecretInfo struct {
+	Name      string
+	UpdatedAt string
+}
+
 // Store is the secret repository. Callers Set/Get/Delete plaintext values by
 // name; encryption and decryption happen inside the implementation so callers
 // never see ciphertext or the key. Get reports absence via ok=false (no error).
+//
+// List returns metadata (name + updated_at) for every stored secret, ordered by
+// name. It never returns values, so a caller listing secrets cannot leak them.
 type Store interface {
 	Set(ctx context.Context, name, plaintext string) error
 	Get(ctx context.Context, name string) (plaintext string, ok bool, err error)
 	Delete(ctx context.Context, name string) error
+	List(ctx context.Context) ([]SecretInfo, error)
 }
 
 // SQLStore persists secrets encrypted-at-rest in the SQLite `secrets` table.
@@ -92,4 +104,27 @@ func (s *SQLStore) Delete(ctx context.Context, name string) error {
 		return fmt.Errorf("secrets: delete %q: %w", name, err)
 	}
 	return nil
+}
+
+// List returns name + updated_at for every stored secret, ordered by name. It
+// reads no ciphertext and decrypts nothing, so it cannot leak secret values.
+func (s *SQLStore) List(ctx context.Context) ([]SecretInfo, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT name, updated_at FROM secrets ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("secrets: list: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // read-only query; close error is non-actionable
+	var out []SecretInfo
+	for rows.Next() {
+		var info SecretInfo
+		if err := rows.Scan(&info.Name, &info.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("secrets: list scan: %w", err)
+		}
+		out = append(out, info)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("secrets: list rows: %w", err)
+	}
+	return out, nil
 }

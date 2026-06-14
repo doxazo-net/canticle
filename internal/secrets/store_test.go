@@ -184,6 +184,132 @@ func TestSQLStoreWrongKeyGetFails(t *testing.T) {
 	}
 }
 
+func TestSQLStoreList(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+
+	// Empty store lists nothing.
+	infos, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("List empty: %v", err)
+	}
+	if len(infos) != 0 {
+		t.Fatalf("List empty = %d rows, want 0", len(infos))
+	}
+
+	// Insert out of name order; List must return ordered by name and never values.
+	if err := store.Set(ctx, NameWebhookAPIKey, "webhook-secret"); err != nil {
+		t.Fatalf("Set webhook: %v", err)
+	}
+	if err := store.Set(ctx, NameMusixmatchToken, "token-secret"); err != nil {
+		t.Fatalf("Set token: %v", err)
+	}
+	infos, err = store.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(infos) != 2 {
+		t.Fatalf("List = %d rows, want 2", len(infos))
+	}
+	if infos[0].Name != NameMusixmatchToken || infos[1].Name != NameWebhookAPIKey {
+		t.Fatalf("List order = [%q, %q], want sorted by name", infos[0].Name, infos[1].Name)
+	}
+	for _, info := range infos {
+		if info.UpdatedAt == "" {
+			t.Fatalf("List %q has empty updated_at", info.Name)
+		}
+		// SecretInfo carries no value field; assert names are not the secret values.
+		if info.Name == "token-secret" || info.Name == "webhook-secret" {
+			t.Fatalf("List leaked a secret value as a name: %q", info.Name)
+		}
+	}
+}
+
+func TestSQLStoreListQueryError(t *testing.T) {
+	ctx := context.Background()
+	store, sqlDB := newTestStore(t)
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := store.List(ctx); err == nil {
+		t.Fatal("List on a closed DB: expected an error")
+	}
+}
+
+func TestSQLStoreDeleteError(t *testing.T) {
+	ctx := context.Background()
+	store, sqlDB := newTestStore(t)
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := store.Delete(ctx, "k"); err == nil {
+		t.Fatal("Delete on a closed DB: expected an error")
+	}
+}
+
+func TestMemoryStoreCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	store := NewMemoryStore()
+	if _, err := store.List(ctx); err == nil {
+		t.Fatal("List with canceled context: expected an error")
+	}
+	if err := store.Set(ctx, "k", "v"); err == nil {
+		t.Fatal("Set with canceled context: expected an error")
+	}
+	if _, _, err := store.Get(ctx, "k"); err == nil {
+		t.Fatal("Get with canceled context: expected an error")
+	}
+	if err := store.Delete(ctx, "k"); err == nil {
+		t.Fatal("Delete with canceled context: expected an error")
+	}
+}
+
+func TestMemoryStoreList(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+
+	infos, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("List empty: %v", err)
+	}
+	if len(infos) != 0 {
+		t.Fatalf("List empty = %d rows, want 0", len(infos))
+	}
+
+	if err := store.Set(ctx, NameWebhookAPIKey, "wv"); err != nil {
+		t.Fatalf("Set webhook: %v", err)
+	}
+	if err := store.Set(ctx, NameMusixmatchToken, "tv"); err != nil {
+		t.Fatalf("Set token: %v", err)
+	}
+	infos, err = store.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(infos) != 2 {
+		t.Fatalf("List = %d rows, want 2", len(infos))
+	}
+	// Ordering parity with SQLStore: sorted by name.
+	if infos[0].Name != NameMusixmatchToken || infos[1].Name != NameWebhookAPIKey {
+		t.Fatalf("List order = [%q, %q], want sorted by name", infos[0].Name, infos[1].Name)
+	}
+	for _, info := range infos {
+		if info.UpdatedAt == "" {
+			t.Fatalf("List %q has empty updated_at", info.Name)
+		}
+	}
+
+	// Delete clears both value and updated_at.
+	if err := store.Delete(ctx, NameMusixmatchToken); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	infos, _ = store.List(ctx)
+	if len(infos) != 1 || infos[0].Name != NameWebhookAPIKey {
+		t.Fatalf("List after delete = %+v, want only webhook", infos)
+	}
+}
+
 func TestMemoryStoreRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	var store Store = NewMemoryStore()

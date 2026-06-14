@@ -79,6 +79,90 @@ docker compose up -d
 
 To inspect or maintain the queue and scan state inside the container, exec the same `mxlrcgo-svc queue` and `mxlrcgo-svc scan results` / `mxlrcgo-svc scan clear` commands documented in the [Inspection commands](#inspection-commands) section below (for example `docker exec mxlrcgo-svc mxlrcgo-svc queue failed`).
 
+## Encrypted secrets
+
+The two recoverable runtime secrets, the Musixmatch API token and the serve-mode webhook API key, can be stored encrypted at rest in the SQLite database (AES-256-GCM) instead of as plaintext in `config.toml` and environment variables. This is opt-in: existing env/TOML setups keep working unchanged, because the encrypted database store is the lowest-precedence source. CLI flags, environment variables, and TOML all still win over it.
+
+### What it protects (and what it does not)
+
+At-rest encryption defends a narrow boundary. It protects against database-only exfiltration: a copied or backed-up `.db` file, an accidental git commit, or a stray copy of just the database cannot be read back into the plaintext token. It does NOT protect a compromised running process (the decrypted values are in memory at use time), and it does NOT protect whole-volume theft when the key file lives in the same mount as the database. That last point is why the env-key path below is the recommended Docker posture.
+
+### Managing secrets
+
+Three commands manage the encrypted store. None of them ever print a secret value.
+
+```sh
+# Encrypt the currently effective plaintext secret(s) into the database. Reads
+# the normal CLI/env/TOML precedence but skips the database itself as a source,
+# so it never copies the database onto itself. With no flag it imports both
+# currently-set secrets; scope it with --token or --webhook.
+mxlrcgo-svc secrets import
+mxlrcgo-svc secrets import --token
+mxlrcgo-svc secrets import --webhook
+
+# Set one secret by name from stdin. The value is read from the terminal prompt
+# or a pipe, never from the command line (the command line lands in shell
+# history and ps). Valid names: musixmatch_token, webhook_api_key.
+mxlrcgo-svc secrets set musixmatch_token        # prompts for the value
+printf '%s' "$TOKEN" | mxlrcgo-svc secrets set musixmatch_token   # or pipe it
+
+# List stored secret names and their last-updated timestamps. Never prints values.
+mxlrcgo-svc secrets list
+```
+
+`secrets import` is idempotent: re-running overwrites the existing encrypted row. After a successful import, the command reminds you to remove the now-redundant plaintext from `config.toml` and your compose environment so it is no longer stored in the clear.
+
+### Key management
+
+The 32-byte encryption key is resolved from one of two sources, in order:
+
+1. `MXLRC_MASTER_KEY` (base64 of 32 random bytes). When set, no key file is read or written. This is the recommended path for Docker because it keeps the key out of the data volume. Generate one with `openssl rand -base64 32`.
+2. A key file (32 raw bytes, auto-generated with `0600` permissions on first use). The default location is a hidden `.mxlrcgo.key` beside the database. This is the native-install default. Override the location with the `secrets.key_file` TOML key or the `MXLRC_SECRETS_KEY_FILE` environment variable, so the key file can live on a separate, narrower mount.
+
+A missing-but-required key, a malformed `MXLRC_MASTER_KEY`, or an unreadable key file is a loud, fatal startup error. The daemon never silently falls back to running unencrypted.
+
+### Docker first-run wizard
+
+In Docker mode (storage paths resolve under `/config`), the daemon refuses to auto-create a key file inside `/config`, because that would put the key in the same volume as the database it protects. `MXLRC_MASTER_KEY` is required there. To keep first-run friction low, the first Docker run with no `MXLRC_MASTER_KEY` set generates a random key, prints a single copy-pasteable `MXLRC_MASTER_KEY=<base64>` line to the container log (stderr only, never the rotating log file), and exits without serving. Copy that value into your container or Unraid template variable and restart.
+
+That one log line is sensitive: if your container logs are shipped or persisted, the suggested key is exposed there once. It is printed a single time, never on subsequent runs and never to the log file. Store it safely; it will not be shown again.
+
+The recommended Docker pattern keeps the key separated from the data volume, sourced from a `.env` file that is NOT inside the `/config` mount:
+
+```yaml
+# docker-compose.yml - recommended: key separated from the data volume
+services:
+  mxlrcgo-svc:
+    image: ghcr.io/sydlexius/mxlrcgo-svc:latest
+    environment:
+      # base64 of 32 random bytes: openssl rand -base64 32
+      MXLRC_MASTER_KEY: ${MXLRC_MASTER_KEY}   # from a .env NOT in the data volume
+    volumes:
+      - ./config:/config                       # holds the DB; NO key file here
+```
+
+Alternatively, keep the key in a file on a separate, narrower mount instead of an env variable:
+
+```yaml
+    environment:
+      MXLRC_SECRETS_KEY_FILE: /run/secrets/mxlrcgo_key
+    secrets:
+      - mxlrcgo_key
+```
+
+### Precedence
+
+The encrypted database store is the lowest-precedence source for both secrets:
+
+- Musixmatch token: `--token` CLI flag, then `MUSIXMATCH_TOKEN`, then `MXLRC_API_TOKEN`, then TOML `api.token`, then the encrypted database store.
+- Webhook key: the CLI/env flag, then TOML `server.webhook_api_keys`, then the encrypted database store.
+
+A higher-precedence source is used as-is at runtime and is never auto-persisted to the database. Persistence happens only when you run `secrets import` or `secrets set`.
+
+### Key-loss recovery
+
+Losing the key (a deleted `.mxlrcgo.key` file or a lost `MXLRC_MASTER_KEY`) makes the encrypted secrets unrecoverable by design: there is no backdoor and no recovery key. The remedy is to re-enter the secrets with their original plaintext, by re-running `secrets import` (from a config or environment that still has the plaintext) or `secrets set`. Keep a copy of `MXLRC_MASTER_KEY` somewhere safe and separate from the data volume.
+
 ## Unraid
 
 An Unraid Community Applications template is provided at `unraid/mxlrcgo-svc.xml`. It follows the same template conventions as the `sydlexius/unraid-templates` repository: GHCR image, bridge networking, `/config` appdata, a music library mapping, and advanced `PUID`/`PGID` permission and tuning fields (scan/work intervals and the filesystem watcher).
