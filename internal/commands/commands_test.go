@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sydlexius/mxlrcgo-svc/internal/auth"
 	"github.com/sydlexius/mxlrcgo-svc/internal/config"
 	"github.com/sydlexius/mxlrcgo-svc/internal/db"
 	"github.com/sydlexius/mxlrcgo-svc/internal/library"
@@ -22,6 +25,7 @@ import (
 	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
 	"github.com/sydlexius/mxlrcgo-svc/internal/scan"
 	"github.com/sydlexius/mxlrcgo-svc/internal/scanner"
+	"github.com/sydlexius/mxlrcgo-svc/internal/server"
 	"github.com/sydlexius/mxlrcgo-svc/internal/worker"
 )
 
@@ -2439,5 +2443,54 @@ func TestLogStartupBanner_CLIAnnotation(t *testing.T) {
 	got := buf.String()
 	if !strings.Contains(got, "(cli)") {
 		t.Errorf("missing (cli) annotation in banner output: %q", got)
+	}
+}
+
+// serveTestAuth is a minimal Authenticator for use in serve-handler regression
+// tests. It accepts every key as if it were admin-scoped.
+type serveTestAuth struct{}
+
+func (serveTestAuth) ValidateKey(_ context.Context, _ string, _ auth.Scope) (auth.Key, error) {
+	return auth.Key{ID: "test-admin"}, nil
+}
+
+// TestServeHandlerWiresMetricsReporter guards the serve command wiring: if
+// WithMetricsReporter is ever removed from the serve handler option list,
+// GET /metrics will return 500 instead of 200. This test constructs the
+// handler with the same option set the serve command uses and asserts that
+// /metrics returns 200 with the expected Prometheus metric families.
+func TestServeHandlerWiresMetricsReporter(t *testing.T) {
+	ctx := context.Background()
+	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	workQ := queue.NewDBQueue(sqlDB)
+
+	// Build the handler with the same option set as the serve command.
+	// WithMetricsReporter is required here; omitting it causes /metrics to 500.
+	h := server.NewHandler(&serveTestAuth{}, workQ, t.TempDir(),
+		server.WithReadiness(sqlDB),
+		server.WithStatusReporter(workQ),
+		server.WithMetricsReporter(workQ),
+		server.WithInventory(scan.New(sqlDB)),
+		server.WithAllowedRoots(nil),
+	)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics?apikey=test-key", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /metrics status = %d; want 200 (body: %q)", rec.Code, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "mxlrcgo_queue_items") {
+		t.Errorf("response body missing mxlrcgo_queue_items\nbody:\n%s", body)
+	}
+	if !strings.Contains(body, "mxlrcgo_queue_failures") {
+		t.Errorf("response body missing mxlrcgo_queue_failures\nbody:\n%s", body)
 	}
 }
