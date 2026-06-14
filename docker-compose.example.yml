@@ -13,6 +13,15 @@ services:
       PGID: "100"
       MUSIXMATCH_TOKEN: "${MUSIXMATCH_TOKEN}"
       MXLRC_WEBHOOK_API_KEY: "${MXLRC_WEBHOOK_API_KEY}"
+      # Master key for encrypted-at-rest secrets. In Docker this is REQUIRED:
+      # the container refuses to auto-create a key file inside /config (that
+      # would colocate the key with the DB it protects). Sourced from a .env
+      # file kept OUTSIDE the /config data volume so the key and the database
+      # are not in the same place. Generate once with: openssl rand -base64 32
+      # On the very first run with this unset, the container prints a suggested
+      # MXLRC_MASTER_KEY=<base64> line to its log and exits; copy it here and
+      # restart. See docs/USER_GUIDE.md "Encrypted secrets".
+      MXLRC_MASTER_KEY: "${MXLRC_MASTER_KEY}"
     volumes:
       - mxlrcgo-svc-config:/config
       - /path/to/your/data:/data:rw

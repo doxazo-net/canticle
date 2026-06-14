@@ -96,6 +96,10 @@ Directory mode overrides `-o/--outdir`; the output extension is `.lrc` for synce
 
 A Musixmatch API token is required. Supply it via the `--token` CLI flag, the `MUSIXMATCH_TOKEN` environment variable, or a `.env`/config file, in that order of precedence (CLI > env > file). To get a token, follow steps 1 to 5 from the [Spicetify guide](https://spicetify.app/docs/faq#sometimes-popup-lyrics-andor-lyrics-plus-seem-to-not-work). See [Configuration](https://sydlexius.github.io/mxlrcgo-svc/CONFIGURATION/) for the full env-var and TOML surface.
 
+## Encrypted secrets
+
+The Musixmatch token and the webhook API key can be stored encrypted at rest in the SQLite database (AES-256-GCM) instead of as plaintext in config and environment variables. It is opt-in and backward compatible: the encrypted store is the lowest-precedence source, so existing env/TOML setups are unchanged. Import the current plaintext with `mxlrcgo-svc secrets import`, set one by name from stdin with `mxlrcgo-svc secrets set <name>`, and list stored names (never values) with `mxlrcgo-svc secrets list`. The 32-byte master key comes from `MXLRC_MASTER_KEY` (recommended for Docker, where it is required) or an auto-generated `0600` key file (the native default). Losing the key makes the encrypted secrets unrecoverable by design; the remedy is to re-import or re-set them with the original plaintext. See the [Encrypted secrets guide](https://sydlexius.github.io/mxlrcgo-svc/USER_GUIDE/#encrypted-secrets).
+
 ## Credits
 
 - [Spicetify Lyrics Plus](https://github.com/spicetify/spicetify-cli/tree/master/CustomApps/lyrics-plus)
