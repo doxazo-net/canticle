@@ -764,6 +764,8 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		Handler: server.NewHandler(authSvc, workQ, outdir,
 			server.WithReadiness(sqlDB),
 			server.WithStatusReporter(workQ),
+			// WithMetricsReporter is required: omitting it causes GET /metrics to return 500.
+			server.WithMetricsReporter(workQ),
 			server.WithInventory(scan.New(sqlDB)),
 			server.WithAllowedRoots(allowedRoots),
 		),
