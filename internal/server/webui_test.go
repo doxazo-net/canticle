@@ -97,10 +97,11 @@ func TestWithWebUIIfDisabled(t *testing.T) {
 		h.ServeHTTP(rec, req)
 
 		// Root with no web UI: the handler has no route for GET /{$}, so it
-		// falls through to 404 (not a redirect).
+		// falls through to 404 (explicitly, not a redirect and not some other
+		// unexpected status like 405/500).
 		if path == "/" {
-			if rec.Code == http.StatusFound {
-				t.Errorf("GET / with WithWebUIIf(false) redirected (want 404, not a web UI redirect)")
+			if rec.Code != http.StatusNotFound {
+				t.Errorf("GET / with WithWebUIIf(false) status = %d, want 404", rec.Code)
 			}
 			continue
 		}

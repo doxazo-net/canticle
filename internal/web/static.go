@@ -42,11 +42,16 @@ func StaticHandler() http.Handler {
 // status line is written, which is why it is applied in WriteHeader.
 type cacheOnOK struct {
 	http.ResponseWriter
-	immutable  bool // fonts: content-stable, long-lived immutable header
-	revalidate bool // CSS: same filename per release, revalidate on each request
+	immutable   bool // fonts: content-stable, long-lived immutable header
+	revalidate  bool // CSS: same filename per release, revalidate on each request
+	wroteHeader bool
 }
 
 func (c *cacheOnOK) WriteHeader(status int) {
+	if c.wroteHeader {
+		return
+	}
+	c.wroteHeader = true
 	if status == http.StatusOK {
 		switch {
 		case c.immutable:
@@ -56,4 +61,15 @@ func (c *cacheOnOK) WriteHeader(status int) {
 		}
 	}
 	c.ResponseWriter.WriteHeader(status)
+}
+
+// Write ensures the Cache-Control header is set before the first byte even when
+// the upstream handler writes the body without an explicit WriteHeader call (an
+// implicit 200). Without this, a future caller of this wrapper that relies on
+// the implicit 200 would bypass the header logic in WriteHeader.
+func (c *cacheOnOK) Write(b []byte) (int, error) {
+	if !c.wroteHeader {
+		c.WriteHeader(http.StatusOK)
+	}
+	return c.ResponseWriter.Write(b)
 }

@@ -52,6 +52,10 @@ func (u *UI) handleReports(w http.ResponseWriter, r *http.Request) {
 // merged effective values, not per-field provenance.
 func (u *UI) handleConfig(w http.ResponseWriter, r *http.Request) {
 	toml := config.FormatConfigText(u.cfg, nil, nil)
+	// Even with secrets redacted, the effective config exposes operational
+	// detail (paths, intervals, provider lanes); keep it out of browser and
+	// intermediary caches.
+	w.Header().Set("Cache-Control", "no-store")
 	render(w, r, templates.ConfigPage(u.version, toml))
 }
 
