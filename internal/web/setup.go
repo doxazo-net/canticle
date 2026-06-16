@@ -191,6 +191,7 @@ func (o *Onboarding) handleSetup(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, webauth.ErrUserExists):
 			// Lost the race to a concurrent setup; the account now exists.
+			o.adminExists.Store(true)
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 		case errors.Is(err, webauth.ErrPasswordTooShort):
 			renderSetup(w, r, http.StatusBadRequest, o.version, passwordTooShortMsg, username)

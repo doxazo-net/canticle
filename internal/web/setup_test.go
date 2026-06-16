@@ -472,6 +472,14 @@ func TestSetupServiceErrorBranches(t *testing.T) {
 		}
 	})
 
+	t.Run("Setup ErrUserExists latches adminExists", func(t *testing.T) {
+		onb := newFakeOnboarding(t, fakeOnboardingService{setupErr: webauth.ErrUserExists}, nil)
+		postFakeSetup(onb)
+		if !onb.adminExists.Load() {
+			t.Fatal("ErrUserExists race path did not set adminExists latch")
+		}
+	})
+
 	t.Run("Setup ErrPasswordTooShort re-renders 400", func(t *testing.T) {
 		onb := newFakeOnboarding(t, fakeOnboardingService{setupErr: webauth.ErrPasswordTooShort}, nil)
 		rec := postFakeSetup(onb)
