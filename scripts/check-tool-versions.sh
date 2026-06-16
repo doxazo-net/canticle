@@ -31,12 +31,12 @@ fi
 if ! command -v grype >/dev/null 2>&1; then
   echo "NOTE: grype not found in PATH; skipping grype version check."
 else
-  expected_grype="$(grep -oE 'grype-version: v[0-9]+\.[0-9]+' .github/workflows/ci.yml 2>/dev/null | head -1 | grep -oE 'v[0-9]+\.[0-9]+' || true)"
+  expected_grype="$(grep -oE 'grype-version: v[0-9]+\.[0-9]+\.[0-9]+' .github/workflows/ci.yml 2>/dev/null | head -1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' || true)"
   if [ -z "$expected_grype" ]; then
     echo "FAIL: could not parse grype-version from .github/workflows/ci.yml." >&2
     status=1
   else
-    local_grype="$(grype version 2>/dev/null | grep '^Version:' | grep -oE '[0-9]+\.[0-9]+' | head -1 | sed 's/^/v/' || true)"
+    local_grype="$(grype version 2>/dev/null | grep '^Version:' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 | sed 's/^/v/' || true)"
     if [ -z "$local_grype" ]; then
       echo "FAIL: could not parse local grype version." >&2
       status=1
