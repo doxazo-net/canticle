@@ -15,14 +15,17 @@ import (
 // staticPrefix is the URL prefix under which embedded assets are served.
 const staticPrefix = "/static/"
 
-// StaticHandler serves the embedded CSS and font assets under /static/. Two
+// StaticHandler serves the embedded CSS, font, and JS assets under /static/. Two
 // caching policies apply:
 //   - Fonts (.woff2): content-stable binaries that never change between
 //     releases; served with a long-lived immutable header.
-//   - CSS (.css): regenerated per release under the same filename (no content
-//     hash); served with no-cache so clients revalidate on each request.
+//   - CSS (.css) and JS (.js): regenerated/vendored per release under the same
+//     filename (no content hash); served with no-cache so clients revalidate on
+//     each request. The vendored htmx.min.js is version-pinned but reuses its
+//     filename across releases, so it revalidates like CSS rather than caching
+//     immutably.
 //     TODO: add content-hash suffixes (e.g. output.<hash>.css) to enable true
-//     immutable caching for CSS too.
+//     immutable caching for these too.
 //
 // Misses (404) and HTML pages are never cached.
 func StaticHandler() http.Handler {
@@ -31,7 +34,7 @@ func StaticHandler() http.Handler {
 		cw := &cacheOnOK{
 			ResponseWriter: w,
 			immutable:      strings.HasSuffix(r.URL.Path, ".woff2"),
-			revalidate:     strings.HasSuffix(r.URL.Path, ".css"),
+			revalidate:     strings.HasSuffix(r.URL.Path, ".css") || strings.HasSuffix(r.URL.Path, ".js"),
 		}
 		fileServer.ServeHTTP(cw, r)
 	})

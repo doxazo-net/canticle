@@ -1,12 +1,15 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sydlexius/mxlrcgo-svc/internal/config"
+	"github.com/sydlexius/mxlrcgo-svc/internal/db"
 )
 
 // TestWithWebUIServesPages verifies that mounting the web UI registers its
@@ -50,6 +53,33 @@ func TestWithWebUIServesPages(t *testing.T) {
 			t.Errorf("Location = %q, want /config", loc)
 		}
 	})
+}
+
+// TestWithReportsDBMountsReports confirms WithReportsDB wires the read-only
+// reports.Repo onto the mounted web UI so the Reports workspace runs a report
+// on demand end-to-end through the server handler.
+func TestWithReportsDBMountsReports(t *testing.T) {
+	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics",
+		WithWebUI(config.Config{}, "vtest"),
+		WithReportsDB(sqlDB))
+
+	req := httptest.NewRequest(http.MethodGet, "/reports/queue-summary", nil)
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /reports/queue-summary = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "Total") {
+		t.Error("reports workspace did not render the queue-summary table")
+	}
 }
 
 // TestWithoutWebUINoPages confirms that, absent WithWebUI, the handler serves

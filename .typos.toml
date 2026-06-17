@@ -7,6 +7,9 @@ extend-exclude = [
     ".opencode/",
     "web/static/fonts/",
     "web/static/css/output.css",
+    # Vendored, minified third-party JS (htmx): its mangled identifiers trip the
+    # spell checker and are not ours to edit.
+    "web/static/js/",
 ]
 
 [default]

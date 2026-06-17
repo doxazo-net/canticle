@@ -1,30 +1,36 @@
 package templates
 
-// Sidebar is the fixed left navigation, ported from the stillwater M55 layout
-// and pared to this project's v1 nav: a brand wordmark with a mono version line,
-// then two destinations, Reports and Config. The active link is marked with
-// aria-current="page", which the .mx-nav-link[aria-current] rule styles with the
-// blue-300 accent token (WCAG AA over the translucent active background).
+// Sidebar is the fixed left navigation, ported from the stillwater M55 layout.
+// It is a true two-pane shell's left rail: a brand wordmark with a mono version
+// line, then a REPORTS group whose nested rows are the five canned reports (the
+// Reports workspace lives here, not in a separate in-content column), then the
+// standalone Config destination, then the sign-out control pinned to the bottom.
+// The active row is marked with aria-current="page", which the
+// .mx-nav-link[aria-current] rule styles with the blue-300 accent token (WCAG AA
+// over the translucent active background).
 //
-// active is the stable path of the current page ("/reports" or "/config").
-templ Sidebar(active string, version string) {
+// active is the stable path of the current page (e.g. "/config"); it highlights
+// the standalone nav links. The report rows highlight from RailItem.Active.
+// reports is the report-nav model in design-doc order.
+templ Sidebar(active string, version string, reports []RailItem) {
 	<nav class="mx-sidebar" aria-label="Main navigation">
 		<div class="mx-sidebar-header">
 			<span class="mx-sidebar-wordmark">mxlrcgo</span>
 			<span class="mx-sidebar-version">{ version }</span>
 		</div>
-		<ul class="mx-sidebar-nav" role="list">
-			<li>
-				@navLink("/reports", "Reports", active) {
-					@iconReports()
-				}
-			</li>
-			<li>
-				@navLink("/config", "Config", active) {
-					@iconConfig()
-				}
-			</li>
-		</ul>
+		<div class="mx-sidebar-nav">
+			<div class="mx-nav-group">
+				<span class="mx-nav-group-label" id="mx-reports-heading">Reports</span>
+				@reportNav(reports, false)
+			</div>
+			<ul class="mx-nav-list" role="list">
+				<li>
+					@navLink("/config", "Config", active) {
+						@iconConfig()
+					}
+				</li>
+			</ul>
+		</div>
 		<div class="mx-sidebar-footer">
 			// /logout is POST-only (it revokes the session server-side and clears the
 			// cookie), so this is a real form submit, not a GET anchor. Rendered on
@@ -38,6 +44,46 @@ templ Sidebar(active string, version string) {
 			</form>
 		</div>
 	</nav>
+}
+
+// reportNav renders the REPORTS group's nested report rows. Each row is a real
+// anchor whose href equals its hx-get URL, so without htmx a click is a normal
+// navigation to /reports/{key} (the handler renders the full page). With htmx it
+// swaps the selected report into the main content area (#mx-main) and pushes the
+// URL, so the address bar stays bookmarkable. It targets #mx-main rather than the
+// report pane because the sidebar renders on every shell page (including /config,
+// where no report pane exists): targeting a pane that may be absent would make a
+// click silently no-op. When oob is true the list carries hx-swap-oob so a
+// report-run fragment re-renders it in place to move the active highlight; the id
+// is stable so the out-of-band swap always targets the same element.
+templ reportNav(reports []RailItem, oob bool) {
+	<ul
+		class="mx-nav-list mx-report-nav"
+		id="mx-report-nav"
+		role="list"
+		aria-labelledby="mx-reports-heading"
+		if oob {
+			hx-swap-oob="true"
+		}
+	>
+		for _, it := range reports {
+			<li>
+				<a
+					class="mx-nav-link mx-report-nav-link"
+					href={ templ.SafeURL("/reports/" + it.Key) }
+					hx-get={ "/reports/" + it.Key }
+					hx-target="#mx-main"
+					hx-swap="innerHTML"
+					hx-push-url="true"
+					if it.Active {
+						aria-current="page"
+					}
+				>
+					<span>{ it.Title }</span>
+				</a>
+			</li>
+		}
+	</ul>
 }
 
 // navLink renders one sidebar entry. The icon is provided by the caller as
@@ -54,16 +100,6 @@ templ navLink(href string, label string, active string) {
 		{ children... }
 		<span>{ label }</span>
 	</a>
-}
-
-// iconReports: a bar-chart glyph for the Reports workspace.
-templ iconReports() {
-	<svg class="mx-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-		<path d="M3 3v18h18"></path>
-		<rect x="7" y="12" width="3" height="6"></rect>
-		<rect x="12" y="8" width="3" height="10"></rect>
-		<rect x="17" y="4" width="3" height="14"></rect>
-	</svg>
 }
 
 // iconLogout: a door-with-arrow glyph for the Sign out control.

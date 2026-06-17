@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"github.com/sydlexius/mxlrcgo-svc/internal/normalize"
 	"github.com/sydlexius/mxlrcgo-svc/internal/pathutil"
 	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
+	"github.com/sydlexius/mxlrcgo-svc/internal/reports"
 	"github.com/sydlexius/mxlrcgo-svc/internal/scan"
 	"github.com/sydlexius/mxlrcgo-svc/internal/trustnet"
 	"github.com/sydlexius/mxlrcgo-svc/internal/web"
@@ -84,6 +86,7 @@ type Handler struct {
 	pathChecker  func(string) error
 	webui        *web.UI
 	onboarding   *web.Onboarding
+	reportsDB    *sql.DB
 	trusted      *trustnet.Policy
 	mux          *http.ServeMux
 }
@@ -184,6 +187,14 @@ func WithOnboarding(o *web.Onboarding) Option {
 	return func(h *Handler) { h.onboarding = o }
 }
 
+// WithReportsDB wires the database that backs the serve-mode Reports workspace.
+// The handler builds a read-only reports.Repo from db and attaches it to the
+// mounted web UI (see NewHandler). It is meaningful only alongside a mounted web
+// UI; with no UI, or a nil db, it is a no-op (the reports routes never mount).
+func WithReportsDB(db *sql.DB) Option {
+	return func(h *Handler) { h.reportsDB = db }
+}
+
 // WithWebUIIf conditionally mounts the web UI. When enabled is false it
 // returns a no-op option so callers do not need an inline if-branch.
 func WithWebUIIf(enabled bool, cfg config.Config, version string) Option {
@@ -215,6 +226,9 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 	if h.webui != nil {
 		if h.onboarding != nil {
 			h.webui.AttachOnboarding(h.onboarding)
+		}
+		if h.reportsDB != nil {
+			h.webui.AttachReports(reports.New(h.reportsDB))
 		}
 		h.webui.Register(h.mux)
 	}

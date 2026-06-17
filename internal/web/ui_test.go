@@ -73,42 +73,44 @@ func TestConfigViewEmptyTokenNotSet(t *testing.T) {
 	}
 }
 
-// TestActiveNavHighlight verifies each page marks exactly its own nav link with
-// aria-current="page", which drives the active-item accent styling.
+// TestActiveNavHighlight verifies the sidebar marks exactly the right row active
+// with aria-current="page", which drives the active-item accent styling. The
+// Config page highlights the Config link; the Reports landing (no report
+// selected) highlights nothing.
 func TestActiveNavHighlight(t *testing.T) {
 	mux := newUIServer(config.Config{}, "dev")
 
-	cases := []struct {
-		path       string
-		activeHref string
-	}{
-		{"/config", "/config"},
-		{"/reports", "/reports"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.path, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
-			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, req)
+	t.Run("config marks Config active", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/config", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /config status = %d, want 200", rec.Code)
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, `href="/config" class="mx-nav-link" aria-current="page"`) {
+			t.Error("config page did not mark the Config nav link active")
+		}
+		// Exactly one row is active: Config, not any report row.
+		if n := strings.Count(body, `aria-current="page"`); n != 1 {
+			t.Errorf("config page should have exactly one active nav row, got %d", n)
+		}
+	})
 
-			if rec.Code != http.StatusOK {
-				t.Fatalf("GET %s status = %d, want 200", tc.path, rec.Code)
-			}
-			body := rec.Body.String()
-			wantActive := `href="` + tc.activeHref + `" class="mx-nav-link" aria-current="page"`
-			if !strings.Contains(body, wantActive) {
-				t.Errorf("page %s did not mark %s active; missing %q", tc.path, tc.activeHref, wantActive)
-			}
-			// The other link must not be active.
-			other := "/reports"
-			if tc.activeHref == "/reports" {
-				other = "/config"
-			}
-			if strings.Contains(body, `href="`+other+`" class="mx-nav-link" aria-current="page"`) {
-				t.Errorf("page %s wrongly marked %s active too", tc.path, other)
-			}
-		})
-	}
+	t.Run("reports landing marks nothing active", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/reports", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /reports status = %d, want 200", rec.Code)
+		}
+		body := rec.Body.String()
+		// No report is selected and Config is not the active page, so no row is
+		// marked active.
+		if strings.Contains(body, `aria-current="page"`) {
+			t.Error("reports landing should mark no nav row active before a report is selected")
+		}
+	})
 }
 
 // TestShellRendersLogoutControl verifies the shared sidebar shell renders a
@@ -153,9 +155,12 @@ func TestRootRedirectsToConfig(t *testing.T) {
 	}
 }
 
-// TestReportsPlaceholder confirms the Reports page renders its placeholder and
-// carries the version in the sidebar.
-func TestReportsPlaceholder(t *testing.T) {
+// TestReportsWorkspaceShell confirms the Reports page renders the true two-pane
+// shell: the sidebar's REPORTS group lists the five canned reports in design-doc
+// order, each report row wires an htmx GET to its on-demand fragment route, the
+// default content pane shows the "select a report" placeholder (nothing runs on
+// load), and the version reaches the sidebar.
+func TestReportsWorkspaceShell(t *testing.T) {
 	mux := newUIServer(config.Config{}, "v1.2.3")
 
 	req := httptest.NewRequest(http.MethodGet, "/reports", nil)
@@ -166,8 +171,50 @@ func TestReportsPlaceholder(t *testing.T) {
 		t.Fatalf("GET /reports status = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "Reports workspace coming soon") {
-		t.Error("Reports page missing placeholder copy")
+
+	// Rail items in design-doc order: each title must appear, and its left-to-
+	// right position must be monotonic so the order is exactly as specified.
+	wantOrder := []string{
+		"Queue summary",
+		"Recent outcomes",
+		"Provider effectiveness",
+		"Instrumental inventory",
+		"Failure analysis",
+	}
+	prev := -1
+	for _, title := range wantOrder {
+		idx := strings.Index(body, title)
+		if idx < 0 {
+			t.Errorf("rail missing report %q", title)
+			continue
+		}
+		if idx <= prev {
+			t.Errorf("report %q is out of design-doc order", title)
+		}
+		prev = idx
+	}
+
+	// On-demand wiring: each report's htmx GET target must be present.
+	for _, key := range []string{
+		"queue-summary", "recent-outcomes", "provider-effectiveness",
+		"instrumental-inventory", "failure-analysis",
+	} {
+		if !strings.Contains(body, `hx-get="/reports/`+key+`"`) {
+			t.Errorf("rail item %q missing hx-get wiring", key)
+		}
+	}
+
+	// Default pane: a placeholder, not a rendered table (no query runs on load).
+	if !strings.Contains(body, "Select a report") {
+		t.Error("default pane missing the select-a-report placeholder")
+	}
+	// Reports are nested in the sidebar under the REPORTS group heading.
+	if !strings.Contains(body, `id="mx-reports-heading"`) {
+		t.Error("sidebar missing the REPORTS group heading")
+	}
+	// HARD CONSTRAINT: no polling / auto-refresh anywhere on the shell.
+	if strings.Contains(body, "hx-trigger") {
+		t.Error("reports shell must not use any hx-trigger (no polling/SSE/auto-refresh)")
 	}
 	if !strings.Contains(body, "v1.2.3") {
 		t.Error("sidebar did not render the version string")

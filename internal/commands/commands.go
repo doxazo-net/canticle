@@ -922,6 +922,9 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		handlerOpts = append(handlerOpts,
 			server.WithWebUIAuth(bannerCfg, version, webAuth),
 			server.WithOnboarding(onboarding),
+			// Back the Reports workspace with the same DB the rest of serve mode
+			// uses; the handler builds a read-only reports.Repo from it (#211).
+			server.WithReportsDB(sqlDB),
 		)
 	}
 	srv := &http.Server{

@@ -5,10 +5,12 @@ package templates
 
 // Layout is the base HTML document for every page. It links the embedded
 // design-tokens + Tailwind output, mounts the fixed Sidebar (with the active
-// nav path and the app version), and renders page content into the main column.
-// The UI is dark-only in v1, so the surface colors come straight from the
-// tokens with no theme class to toggle.
-templ Layout(title string, active string, version string) {
+// nav path, the app version, and the report-nav model), and renders page content
+// into the main column. The main column carries id="mx-main": it is the htmx
+// swap target for the sidebar report rows, so selecting a report from any page
+// replaces the content here. The UI is dark-only in v1, so the surface colors
+// come straight from the tokens with no theme class to toggle.
+templ Layout(title string, active string, version string, reports []RailItem) {
 	<!DOCTYPE html>
 	<html lang="en">
 		<head>
@@ -16,11 +18,16 @@ templ Layout(title string, active string, version string) {
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
 			<title>{ title } - mxlrcgo-svc</title>
 			<link rel="stylesheet" href="/static/css/output.css"/>
+			// htmx powers the Reports workspace's on-demand fragment swaps. It is
+			// vendored and served from /static (no CDN), so the single binary stays
+			// self-contained and offline. defer keeps it non-render-blocking; htmx
+			// processes the DOM on DOMContentLoaded.
+			<script src="/static/js/htmx.min.js" defer></script>
 		</head>
 		<body>
 			<div class="mx-shell">
-				@Sidebar(active, version)
-				<main class="mx-content">
+				@Sidebar(active, version, reports)
+				<main class="mx-content" id="mx-main">
 					{ children... }
 				</main>
 			</div>
