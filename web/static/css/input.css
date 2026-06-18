@@ -79,13 +79,40 @@ body {
   color: var(--mx-sidebar-text);
 }
 
+/* The sidebar nav stacks the REPORTS group above the standalone Config link; the
+   footer (sign out) is pinned to the bottom by .mx-sidebar-footer's margin-top. */
 .mx-sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+/* A list of nav rows: the REPORTS group's report links, and the standalone
+   Config link. Resets list chrome; row spacing matches the original sidebar. */
+.mx-nav-list {
   display: flex;
   flex-direction: column;
   gap: 0.125rem;
   list-style: none;
   margin: 0;
   padding: 0;
+}
+
+/* The REPORTS group: a small uppercase section label above its nested report
+   rows (stillwater tree style). */
+.mx-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.mx-nav-group-label {
+  padding: 0.5rem 0.625rem 0.25rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--mx-sidebar-text);
 }
 
 .mx-nav-link {
@@ -115,6 +142,15 @@ body {
   width: 1.125rem;
   height: 1.125rem;
   flex: none;
+}
+
+/* A nested report row under the REPORTS label: indented past the label, slightly
+   smaller, no leading icon (the group header carries the section meaning). It
+   inherits the hover and active (aria-current accent) treatment from
+   .mx-nav-link; only the indent and size differ. */
+.mx-report-nav-link {
+  padding-inline-start: 1.25rem;
+  font-size: 0.84rem;
 }
 
 /* Sidebar footer holds the sign-out control, pushed to the bottom of the column
@@ -326,6 +362,146 @@ body {
 
 .mx-auth-version {
   font-family: var(--mx-font-mono);
+}
+
+/* -- Reports workspace (issue #211) ---------------------------------------- */
+/* True two-pane: the reports are nested in the left sidebar (REPORTS group, see
+   the .mx-nav-* rules); this is the right-hand content pane -- a full-width card
+   holding the selected report's header and table. All classes here are authored
+   as literal CSS (not Tailwind utilities), so they are always emitted regardless
+   of @source globs. */
+.mx-report-pane {
+  margin-top: 0.5rem;
+  background-color: var(--mx-surface-bg);
+  border: 1px solid var(--mx-surface-border);
+  border-radius: var(--mx-radius-md);
+  padding: 1.25rem 1.5rem;
+}
+
+.mx-report-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.mx-report-title {
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: #f1f5f9; /* slate-100 */
+  margin: 0 0 0.25rem;
+}
+
+.mx-report-sub {
+  font-size: 0.825rem;
+  color: var(--mx-content-text-secondary);
+  margin: 0;
+}
+
+.mx-report-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
+  flex: none;
+}
+
+.mx-report-ts {
+  font-family: var(--mx-font-mono);
+  font-size: 0.72rem;
+  color: var(--mx-content-text-secondary);
+  white-space: nowrap;
+}
+
+/* "Run now" re-runs the selected report. Styled to match the primary button
+   token; it is an anchor (not a button) so it degrades to a real navigation when
+   JS is unavailable. */
+.mx-run-button {
+  font-family: var(--mx-font-sans);
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #f8fafc;
+  background-color: var(--mx-primary);
+  border: 1px solid transparent;
+  border-radius: var(--mx-radius-sm);
+  padding: 0.4rem 0.85rem;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background-color 0.12s ease;
+}
+
+.mx-run-button:hover {
+  background-color: var(--mx-accent);
+}
+
+.mx-approx {
+  font-size: 0.75rem;
+  color: var(--mx-content-text-secondary);
+  margin: 0 0 0.75rem;
+}
+
+/* The table scrolls within the pane so its header can stick while rows scroll. */
+.mx-table-wrap {
+  overflow: auto;
+  max-height: 68vh;
+  border: 1px solid var(--mx-surface-border);
+  border-radius: var(--mx-radius-sm);
+}
+
+.mx-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+
+.mx-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-align: left;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--mx-content-text-secondary);
+  background-color: var(--mx-sidebar-bg);
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--mx-surface-border);
+}
+
+.mx-table tbody td {
+  padding: 0.45rem 0.75rem;
+  border-bottom: 1px solid var(--mx-surface-border);
+  color: var(--mx-content-text);
+  vertical-align: top;
+}
+
+.mx-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.mx-cell-mono {
+  font-family: var(--mx-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.mx-row-total td {
+  font-weight: 700;
+  color: #f1f5f9; /* slate-100 */
+}
+
+.mx-report-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 12rem;
+  padding: 1rem;
+  border: 1px dashed var(--mx-surface-border);
+  border-radius: var(--mx-radius-sm);
+  color: var(--mx-content-text-secondary);
+  text-align: center;
 }
 
 /* -- Empty / placeholder state -------------------------------------------- */

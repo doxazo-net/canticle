@@ -16,10 +16,12 @@ import templruntime "github.com/a-h/templ/runtime"
 
 // Layout is the base HTML document for every page. It links the embedded
 // design-tokens + Tailwind output, mounts the fixed Sidebar (with the active
-// nav path and the app version), and renders page content into the main column.
-// The UI is dark-only in v1, so the surface colors come straight from the
-// tokens with no theme class to toggle.
-func Layout(title string, active string, version string) templ.Component {
+// nav path, the app version, and the report-nav model), and renders page content
+// into the main column. The main column carries id="mx-main": it is the htmx
+// swap target for the sidebar report rows, so selecting a report from any page
+// replaces the content here. The UI is dark-only in v1, so the surface colors
+// come straight from the tokens with no theme class to toggle.
+func Layout(title string, active string, version string, reports []RailItem) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -47,21 +49,21 @@ func Layout(title string, active string, version string) templ.Component {
 		var templ_7745c5c3_Var2 string
 		templ_7745c5c3_Var2, templ_7745c5c3_Err = templ.JoinStringErrs(title)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `web/templates/layout.templ`, Line: 17, Col: 17}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `web/templates/layout.templ`, Line: 19, Col: 17}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var2))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, " - mxlrcgo-svc</title><link rel=\"stylesheet\" href=\"/static/css/output.css\"></head><body><div class=\"mx-shell\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, " - mxlrcgo-svc</title><link rel=\"stylesheet\" href=\"/static/css/output.css\"><script src=\"/static/js/htmx.min.js\" defer></script></head><body><div class=\"mx-shell\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = Sidebar(active, version).Render(ctx, templ_7745c5c3_Buffer)
+		templ_7745c5c3_Err = Sidebar(active, version, reports).Render(ctx, templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<main class=\"mx-content\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 3, "<main class=\"mx-content\" id=\"mx-main\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
