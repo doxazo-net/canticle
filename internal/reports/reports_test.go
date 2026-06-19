@@ -111,11 +111,11 @@ func insertLaneAttempts(t *testing.T, sqlDB *sql.DB, lane string, hits, misses i
 		}
 	}
 	var qid int64
-	for range hits {
+	for i := int64(0); i < hits; i++ {
 		qid++
 		insert(qid, 1)
 	}
-	for range misses {
+	for i := int64(0); i < misses; i++ {
 		qid++
 		insert(qid, 0)
 	}
