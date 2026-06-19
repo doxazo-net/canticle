@@ -3,6 +3,8 @@ package web
 import (
 	"bytes"
 	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -296,6 +298,10 @@ func TestDurationCanonical(t *testing.T) {
 		{"api.miss_backoff_base_hours", "7", "days", "168", false}, // canonical hours
 		{"api.cooldown", "5", "fortnights", "", true},              // unknown unit
 		{"api.cooldown", "abc", "seconds", "", true},               // non-numeric
+		{"api.cooldown", "NaN", "seconds", "", true},               // ParseFloat accepts NaN; must reject
+		{"api.cooldown", "Inf", "seconds", "", true},               // ParseFloat accepts Inf; must reject
+		{"api.cooldown", "+Inf", "seconds", "", true},              // explicit +Inf
+		{"api.cooldown", "-Inf", "seconds", "", true},              // explicit -Inf
 	}
 	for _, c := range cases {
 		got, err := durationCanonical(c.path, c.value, c.unit)
@@ -315,6 +321,43 @@ func TestDurationCanonical(t *testing.T) {
 	// Empty unit falls back to the field's display unit.
 	if got, err := durationCanonical("api.cooldown", "10", ""); err != nil || got != "10" {
 		t.Errorf("empty-unit cooldown = %q (err %v), want 10 (seconds display)", got, err)
+	}
+}
+
+// errSecretStore is a secrets.Store whose Get always fails, to exercise the
+// display path's backend-error branch (a failed read must NOT render as "set"
+// and must be logged, never silently swallowed).
+type errSecretStore struct{ fakeSecretStore }
+
+func (*errSecretStore) Get(_ context.Context, _ string) (string, bool, error) {
+	return "", false, errors.New("backend unavailable")
+}
+
+func TestCurrentConfigSecretStoreReadError(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(seedConfigTOML), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Capture slog output so we can assert the error was surfaced, not swallowed.
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	u := NewUI(config.Config{}, "v0", WithConfigPath(cfgPath), WithSecretStore(&errSecretStore{}))
+	cfg := u.currentConfig(context.Background())
+
+	// A failed store read must not be rendered as a present secret.
+	if cfg.API.Token == secretPresentSentinel {
+		t.Errorf("API.Token = sentinel on store error; failed read must not read as set")
+	}
+	if len(cfg.Server.WebhookAPIKeys) != 0 {
+		t.Errorf("WebhookAPIKeys = %v on store error; failed read must not read as set", cfg.Server.WebhookAPIKeys)
+	}
+	if !strings.Contains(logBuf.String(), "secret-store read failed") {
+		t.Errorf("expected a logged warning about the failed secret-store read, got: %q", logBuf.String())
 	}
 }
 

@@ -177,12 +177,16 @@ func (u *UI) currentConfig(ctx context.Context) config.Config {
 	}
 	if u.secretStore != nil {
 		if cfg.API.Token == "" {
-			if _, ok, _ := u.secretStore.Get(ctx, secrets.NameMusixmatchToken); ok {
+			if _, ok, err := u.secretStore.Get(ctx, secrets.NameMusixmatchToken); err != nil {
+				slog.Warn("settings: secret-store read failed; secret presence unknown for display", "key", secrets.NameMusixmatchToken, "error", err)
+			} else if ok {
 				cfg.API.Token = secretPresentSentinel
 			}
 		}
 		if len(cfg.Server.WebhookAPIKeys) == 0 {
-			if v, ok, _ := u.secretStore.Get(ctx, secrets.NameWebhookAPIKey); ok && v != "" {
+			if v, ok, err := u.secretStore.Get(ctx, secrets.NameWebhookAPIKey); err != nil {
+				slog.Warn("settings: secret-store read failed; secret presence unknown for display", "key", secrets.NameWebhookAPIKey, "error", err)
+			} else if ok && v != "" {
 				cfg.Server.WebhookAPIKeys = []string{secretPresentSentinel}
 			}
 		}

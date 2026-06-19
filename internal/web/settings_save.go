@@ -260,7 +260,7 @@ func durationCanonical(path, valueStr, unit string) (string, error) {
 		return "", fmt.Errorf("invalid unit for this field")
 	}
 	n, err := strconv.ParseFloat(strings.TrimSpace(valueStr), 64)
-	if err != nil {
+	if err != nil || math.IsNaN(n) || math.IsInf(n, 0) {
 		return "", fmt.Errorf("must be a number")
 	}
 	canonical := n * unitSeconds[unit] / unitSeconds[du.canonical]
