@@ -263,6 +263,42 @@ func TestLaneCallsOnThrottleOnTripAfterSuccess(t *testing.T) {
 	}
 }
 
+func TestLaneCallsOnThrottleOnRateLimitNoPriorSuccess(t *testing.T) {
+	// A rate-limit is ALWAYS a throttle signal: the pacer must ratchet even with
+	// no successful fetch yet this session.
+	p := &adaptiveStubProvider{name: "musixmatch", err: fmt.Errorf("x: %w", musixmatch.ErrRateLimited)}
+	cb := circuit.New(60*time.Second, 30*time.Minute)
+	l := NewLane(p, cb)
+
+	_, err := l.FindLyrics(context.Background(), models.Track{})
+	if !errors.Is(err, musixmatch.ErrRateLimited) {
+		t.Fatalf("err = %v; want ErrRateLimited", err)
+	}
+	if cb.EverSucceeded() {
+		t.Fatal("precondition: breaker must report !EverSucceeded for this case")
+	}
+	if p.throttles != 1 {
+		t.Fatalf("OnThrottle calls = %d; want 1 (rate-limit is always a throttle, even with no prior success)", p.throttles)
+	}
+}
+
+func TestLaneCallsOnThrottleOnRateLimitAfterSuccess(t *testing.T) {
+	// A rate-limit AFTER a prior success is likewise a throttle: the pacer must
+	// ratchet.
+	p := &adaptiveStubProvider{name: "musixmatch", err: fmt.Errorf("x: %w", musixmatch.ErrRateLimited)}
+	cb := circuit.New(60*time.Second, 30*time.Minute)
+	cb.RecordSuccess()
+	l := NewLane(p, cb)
+
+	_, err := l.FindLyrics(context.Background(), models.Track{})
+	if !errors.Is(err, musixmatch.ErrRateLimited) {
+		t.Fatalf("err = %v; want ErrRateLimited", err)
+	}
+	if p.throttles != 1 {
+		t.Fatalf("OnThrottle calls = %d; want 1 (rate-limit after a prior success is a throttle)", p.throttles)
+	}
+}
+
 func TestLaneCallsOnThrottleOnTruncated(t *testing.T) {
 	// A truncated response is always a throttle signal, even with no prior
 	// success this session: the pacer must ratchet.
