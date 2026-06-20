@@ -38,11 +38,10 @@ func TestFormatReportTime(t *testing.T) {
 	})
 
 	t.Run("explicit non-UTC loc converts the timestamp", func(t *testing.T) {
-		loc, err := time.LoadLocation("America/Los_Angeles")
-		if err != nil {
-			t.Fatalf("load location: %v", err)
-		}
-		// 23:30 UTC on 2026-06-20 is 16:30 PDT (UTC-7) the same day.
+		// A fixed -7h zone stands in for PDT so the case needs no IANA tzdata
+		// file (minimal containers/CI may ship without it). 23:30 UTC on
+		// 2026-06-20 shifts to the 16:30 wall clock with the PDT label.
+		loc := time.FixedZone("PDT", -7*3600)
 		want := "2026-06-20 16:30:00 PDT"
 		if got := formatReportTime(in, loc); got != want {
 			t.Fatalf("non-UTC loc: got %q, want %q", got, want)
