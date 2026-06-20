@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/sydlexius/mxlrcgo-svc/internal/reports"
 	"github.com/sydlexius/mxlrcgo-svc/web/templates"
 )
 
@@ -58,27 +59,13 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 	if err != nil {
 		return templates.DashboardView{}, fmt.Errorf("dashboard: queue summary: %w", err)
 	}
-	view.QueueTiles = []templates.StatTile{
-		{Label: "Pending", Value: strconv.FormatInt(qs.Pending, 10)},
-		{Label: "Processing", Value: strconv.FormatInt(qs.Processing, 10)},
-		{Label: "Done", Value: strconv.FormatInt(qs.Done, 10)},
-		{Label: "Failed", Value: strconv.FormatInt(qs.Failed, 10)},
-		{Label: "Deferred", Value: strconv.FormatInt(qs.Deferred, 10)},
-	}
+	view.QueueTiles = buildQueueTiles(qs)
 
 	pe, err := u.reports.ProviderEffectiveness(ctx)
 	if err != nil {
 		return templates.DashboardView{}, fmt.Errorf("dashboard: provider effectiveness: %w", err)
 	}
-	view.ProviderTiles = make([]templates.StatTile, 0, len(pe))
-	for _, p := range pe {
-		attempts := p.Hits + p.Misses
-		view.ProviderTiles = append(view.ProviderTiles, templates.StatTile{
-			Label: p.Lane,
-			Value: fmt.Sprintf("%d/%d", p.Hits, attempts),
-			Sub:   fmt.Sprintf("%.0f%%", p.HitRate*100),
-		})
-	}
+	view.ProviderTiles = buildProviderTiles(pe)
 
 	instrumental, err := u.reports.CountInstrumental(ctx)
 	if err != nil {
@@ -90,10 +77,43 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 	if err != nil {
 		return templates.DashboardView{}, fmt.Errorf("dashboard: recent outcomes: %w", err)
 	}
-	view.RecentRows = make([]templates.RecentOutcomeRow, 0, len(recent))
+	view.RecentRows = buildRecentRows(recent, serverLoc)
+
+	return view, nil
+}
+
+// buildQueueTiles shapes a QueueSummary into the dashboard's queue stat tiles.
+func buildQueueTiles(qs reports.QueueSummary) []templates.StatTile {
+	return []templates.StatTile{
+		{Label: "Pending", Value: strconv.FormatInt(qs.Pending, 10)},
+		{Label: "Processing", Value: strconv.FormatInt(qs.Processing, 10)},
+		{Label: "Done", Value: strconv.FormatInt(qs.Done, 10)},
+		{Label: "Failed", Value: strconv.FormatInt(qs.Failed, 10)},
+		{Label: "Deferred", Value: strconv.FormatInt(qs.Deferred, 10)},
+	}
+}
+
+// buildProviderTiles shapes per-provider effectiveness rows into stat tiles.
+func buildProviderTiles(pe []reports.ProviderEffectiveness) []templates.StatTile {
+	tiles := make([]templates.StatTile, 0, len(pe))
+	for _, p := range pe {
+		attempts := p.Hits + p.Misses
+		tiles = append(tiles, templates.StatTile{
+			Label: p.Lane,
+			Value: fmt.Sprintf("%d/%d", p.Hits, attempts),
+			Sub:   fmt.Sprintf("%.0f%%", p.HitRate*100),
+		})
+	}
+	return tiles
+}
+
+// buildRecentRows shapes recent outcomes into table rows, formatting each
+// completed-at timestamp in serverLoc when set (see formatDashboardTime).
+func buildRecentRows(recent []reports.RecentOutcome, serverLoc *time.Location) []templates.RecentOutcomeRow {
+	rows := make([]templates.RecentOutcomeRow, 0, len(recent))
 	for _, o := range recent {
 		display, iso, tzApplied := formatDashboardTime(o.CompletedAt, serverLoc)
-		view.RecentRows = append(view.RecentRows, templates.RecentOutcomeRow{
+		rows = append(rows, templates.RecentOutcomeRow{
 			Artist:               o.Artist,
 			Title:                o.Title,
 			Album:                o.Album,
@@ -104,8 +124,7 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 			CompletedAtTZApplied: tzApplied,
 		})
 	}
-
-	return view, nil
+	return rows
 }
 
 // formatDashboardTime formats a completed-at timestamp for the dashboard table.
