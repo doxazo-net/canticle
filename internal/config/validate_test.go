@@ -78,6 +78,31 @@ func TestValidateAndSet_TLSPEMFile(t *testing.T) {
 	}
 }
 
+func TestValidateHTTPURL(t *testing.T) {
+	accepted := []string{
+		"http://localhost:9000",
+		"https://infer.example.com/v1",
+		"http://whisper:9000/v1/audio/transcriptions",
+	}
+	for _, u := range accepted {
+		if err := ValidateHTTPURL(u); err != nil {
+			t.Errorf("ValidateHTTPURL(%q) rejected; want accepted: %v", u, err)
+		}
+	}
+	rejected := []string{
+		"not a url",
+		"/foo",             // scheme-less absolute path
+		"example.com/path", // scheme-less host
+		"example.com",      // no scheme, no path
+		"",                 // empty
+	}
+	for _, u := range rejected {
+		if err := ValidateHTTPURL(u); err == nil {
+			t.Errorf("ValidateHTTPURL(%q) accepted; want rejected", u)
+		}
+	}
+}
+
 func TestValidateAndSet_URL(t *testing.T) {
 	// Empty means "unset" and is allowed.
 	if err := ValidateAndSet("verification.whisper_url", ""); err != nil {
@@ -93,13 +118,18 @@ func TestValidateAndSet_URL(t *testing.T) {
 	if err := ValidateAndSet("instrumental_detector.classifier_url", "https://infer.example.com/v1"); err != nil {
 		t.Errorf("valid classifier_url rejected: %v", err)
 	}
-	// A string with no scheme is rejected (ParseRequestURI requires an absolute URI or
-	// absolute path; a plain hostname-like word with no colon or leading slash fails).
+	// Scheme-less inputs are rejected: bare hostname, absolute path, no-scheme host+path.
 	if err := ValidateAndSet("verification.whisper_url", "not a url"); err == nil {
 		t.Error("expected rejection of whisper_url with no scheme")
 	}
 	if err := ValidateAndSet("instrumental_detector.classifier_url", "not a url"); err == nil {
 		t.Error("expected rejection of classifier_url with no scheme")
+	}
+	if err := ValidateAndSet("verification.whisper_url", "/foo"); err == nil {
+		t.Error("expected rejection of whisper_url with scheme-less path /foo")
+	}
+	if err := ValidateAndSet("verification.whisper_url", "example.com"); err == nil {
+		t.Error("expected rejection of whisper_url with scheme-less host example.com")
 	}
 }
 

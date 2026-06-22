@@ -134,18 +134,27 @@ func ValidatePathExists() Validator {
 	}
 }
 
-// ValidateURL accepts an empty value (meaning "unset") or a string that parses
-// as a URL with a scheme, mirroring the boot-time check in
+// ValidateHTTPURL returns a non-nil error if s is not a URL with a non-empty
+// scheme and host. Used by both the settings-save validator (ValidateURL) and
+// the boot-time constructors in internal/verification and internal/detector, so
+// the UI rejects exactly the same inputs that boot would later reject.
+func ValidateHTTPURL(s string) error {
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("must be a valid URL with scheme and host (e.g. https://host/path)")
+	}
+	return nil
+}
+
+// ValidateURL accepts an empty value (meaning "unset") or a string that passes
+// ValidateHTTPURL (non-empty scheme and host), mirroring the boot-time check in
 // internal/verification/verification.go and internal/detector/http.go.
 func ValidateURL() Validator {
 	return func(value string) error {
 		if value == "" {
 			return nil
 		}
-		if _, err := url.ParseRequestURI(value); err != nil {
-			return fmt.Errorf("must be a valid URL (with scheme)")
-		}
-		return nil
+		return ValidateHTTPURL(value)
 	}
 }
 
