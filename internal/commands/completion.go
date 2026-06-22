@@ -133,34 +133,34 @@ func completionLibraryNames(ctx context.Context) []string {
 	return names
 }
 
-const bashCompletion = `# mxlrcgo-svc bash completion. Source this file (e.g. from ~/.bashrc):
-#   source <(mxlrcgo-svc completion bash)
-_mxlrcgo_svc_complete() {
+const bashCompletion = `# canticle bash completion. Source this file (e.g. from ~/.bashrc):
+#   source <(canticle completion bash)
+_canticle_complete() {
     local cur words
     cur="${COMP_WORDS[COMP_CWORD]}"
     words=("${COMP_WORDS[@]:1:COMP_CWORD}")
     local IFS=$'\n'
-    COMPREPLY=( $(mxlrcgo-svc __complete "${words[@]}") )
+    COMPREPLY=( $(canticle __complete "${words[@]}") )
 }
-complete -F _mxlrcgo_svc_complete mxlrcgo-svc
+complete -F _canticle_complete canticle
 `
 
-const zshCompletion = `#compdef mxlrcgo-svc
-# mxlrcgo-svc zsh completion. Source this file (e.g. from ~/.zshrc):
-#   source <(mxlrcgo-svc completion zsh)
-_mxlrcgo_svc_complete() {
+const zshCompletion = `#compdef canticle
+# canticle zsh completion. Source this file (e.g. from ~/.zshrc):
+#   source <(canticle completion zsh)
+_canticle_complete() {
     local -a completions
-    completions=("${(@f)$(mxlrcgo-svc __complete "${words[@]:1}")}")
+    completions=("${(@f)$(canticle __complete "${words[@]:1}")}")
     compadd -- "${completions[@]}"
 }
-compdef _mxlrcgo_svc_complete mxlrcgo-svc
+compdef _canticle_complete canticle
 `
 
-const fishCompletion = `# mxlrcgo-svc fish completion. Save to ~/.config/fish/completions/mxlrcgo-svc.fish:
-#   mxlrcgo-svc completion fish > ~/.config/fish/completions/mxlrcgo-svc.fish
-function __mxlrcgo_svc_complete
+const fishCompletion = `# canticle fish completion. Save to ~/.config/fish/completions/canticle.fish:
+#   canticle completion fish > ~/.config/fish/completions/canticle.fish
+function __canticle_complete
     set -l tokens (commandline -opc) (commandline -ct)
-    mxlrcgo-svc __complete $tokens[2..-1]
+    canticle __complete $tokens[2..-1]
 end
-complete -c mxlrcgo-svc -f -a '(__mxlrcgo_svc_complete)'
+complete -c canticle -f -a '(__canticle_complete)'
 `

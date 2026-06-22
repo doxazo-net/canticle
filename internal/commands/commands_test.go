@@ -334,22 +334,22 @@ func TestRunSubcommandHelpShowsSelectedCommand(t *testing.T) {
 		{
 			name: "serve",
 			args: []string{"serve", "--help"},
-			want: []string{"Usage: mxlrcgo-svc serve", "--scan-interval", "--work-interval"},
+			want: []string{"Usage: canticle serve", "--scan-interval", "--work-interval"},
 		},
 		{
 			name: "scan",
 			args: []string{"scan", "--help"},
-			want: []string{"Usage: mxlrcgo-svc scan", "--upgrade", "--bfs"},
+			want: []string{"Usage: canticle scan", "--upgrade", "--bfs"},
 		},
 		{
 			name: "library",
 			args: []string{"library", "--help"},
-			want: []string{"Usage: mxlrcgo-svc library", "add", "list"},
+			want: []string{"Usage: canticle library", "add", "list"},
 		},
 		{
 			name: "library add",
 			args: []string{"library", "add", "--help"},
-			want: []string{"Usage: mxlrcgo-svc library add", "--name", "--config"},
+			want: []string{"Usage: canticle library add", "--name", "--config"},
 		},
 	}
 
@@ -375,10 +375,10 @@ func TestRunSubcommandParseErrorShowsSelectedUsage(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("Run exit code = %d; want 2", code)
 	}
-	if !strings.Contains(out.String(), "Usage: mxlrcgo-svc serve") {
+	if !strings.Contains(out.String(), "Usage: canticle serve") {
 		t.Fatalf("usage output = %q; want serve usage", out.String())
 	}
-	if strings.Contains(out.String(), "Usage: mxlrcgo-svc <command>") {
+	if strings.Contains(out.String(), "Usage: canticle <command>") {
 		t.Fatalf("usage output = %q; want selected subcommand usage, not top-level usage", out.String())
 	}
 }

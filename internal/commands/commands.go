@@ -364,7 +364,7 @@ func Run(ctx context.Context, rawArgs []string, out io.Writer, deps Deps) int {
 	if !usesSubcommand(rawArgs) {
 		parseTarget = &legacy
 	}
-	parser, err := arg.NewParser(arg.Config{Program: "mxlrcgo-svc", Out: out}, parseTarget)
+	parser, err := arg.NewParser(arg.Config{Program: "canticle", Out: out}, parseTarget)
 	if err != nil {
 		_, _ = fmt.Fprintln(out, err)
 		return 2

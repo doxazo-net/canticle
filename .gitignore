@@ -8,7 +8,7 @@
 *.so
 *.dylib
 mxlrc-go
-/mxlrcgo-svc
+/canticle
 
 # Test binary, built with `go test -c`
 *.test

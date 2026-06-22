@@ -12,7 +12,7 @@ coverage.html
 dist
 lyrics
 mxlrc-go
-mxlrcgo-svc
+canticle
 *_failed.txt
 
 .DS_Store

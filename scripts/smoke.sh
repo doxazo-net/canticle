@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/mxlrcgo-svc-smoke.XXXXXX")"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-BIN="$TMPDIR/mxlrcgo-svc"
+BIN="$TMPDIR/canticle"
 CONFIG_HOME="$TMPDIR/config"
 DATA_HOME="$TMPDIR/data"
 OUTDIR="$TMPDIR/out"
@@ -15,7 +15,7 @@ mkdir -p "$CONFIG_HOME" "$DATA_HOME" "$OUTDIR"
 CGO_ENABLED=0 go build -o "$BIN" "$ROOT/cmd/mxlrcgo-svc"
 
 help_output="$("$BIN" --help)"
-if [[ "$help_output" != *"Usage: mxlrcgo-svc"* ]]; then
+if [[ "$help_output" != *"Usage: canticle"* ]]; then
   echo "smoke: --help output did not include usage" >&2
   exit 1
 fi

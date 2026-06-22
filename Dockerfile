@@ -8,7 +8,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/mxlrcgo-svc ./cmd/mxlrcgo-svc
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/canticle ./cmd/mxlrcgo-svc
 
 FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
@@ -27,7 +27,7 @@ RUN apk add --no-cache bash ca-certificates ffmpeg su-exec tzdata && \
     mkdir -p /config /music && \
     chown mxlrcgo:mxlrcgo /config /music
 
-COPY --from=build /out/mxlrcgo-svc /usr/local/bin/mxlrcgo-svc
+COPY --from=build /out/canticle /usr/local/bin/canticle
 COPY build/docker/entrypoint.sh /entrypoint.sh
 # Make the entrypoint executable and pre-ship bash completion: generate the
 # static wrapper and source it from the system bashrc so interactive
@@ -36,8 +36,8 @@ COPY build/docker/entrypoint.sh /entrypoint.sh
 # one an interactive non-login shell reads here). We also write the conventional
 # /etc/bash.bashrc for robustness if the base image ever changes; both are guarded.
 RUN chmod +x /entrypoint.sh && \
-    mxlrcgo-svc completion bash > /etc/bash/mxlrcgo-svc.bash && \
-    printf '\n[ -f /etc/bash/mxlrcgo-svc.bash ] && . /etc/bash/mxlrcgo-svc.bash\n' \
+    canticle completion bash > /etc/bash/canticle.bash && \
+    printf '\n[ -f /etc/bash/canticle.bash ] && . /etc/bash/canticle.bash\n' \
       | tee -a /etc/bash/bashrc /etc/bash.bashrc > /dev/null
 
 ENV MXLRC_DOCKER=true \
@@ -50,4 +50,4 @@ VOLUME ["/config", "/music"]
 # USER is intentionally omitted so entrypoint.sh can perform PUID/PGID
 # remapping and volume ownership fixes as root before dropping to mxlrcgo.
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["mxlrcgo-svc", "serve"]
+CMD ["canticle", "serve"]
