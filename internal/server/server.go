@@ -327,6 +327,15 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// contentSecurityPolicy is the single authoritative CSP applied to every
+// serve-mode response. 'unsafe-inline' in script-src is required by the
+// dashboard's inline timezone-rewrite <script> IIFE (web/templates/dashboard.templ),
+// which runs before paint to localize timestamps; a stricter script-src would
+// break that page. Future hardening: replace 'unsafe-inline' with a per-request
+// nonce or a precomputed hash for that one inline block. There are no inline
+// styles, so style-src stays at 'self'.
+const contentSecurityPolicy = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'self'"
+
 // setSecurityHeaders applies a conservative baseline of security headers to
 // every serve-mode response (static assets and pages alike). It must be called
 // before any handler writes a status line or body, otherwise the headers are
@@ -335,13 +344,7 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	h := w.Header()
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Frame-Options", "DENY")
-	// 'unsafe-inline' in script-src is required by the dashboard's inline
-	// timezone-rewrite <script> IIFE (web/templates/dashboard.templ), which
-	// runs before paint to localize timestamps. A stricter script-src would
-	// break that page. Future hardening: replace 'unsafe-inline' with a
-	// per-request nonce or a precomputed hash for that one inline block.
-	// There are no inline styles, so style-src stays at 'self'.
-	h.Set("Content-Security-Policy", "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'self'")
+	h.Set("Content-Security-Policy", contentSecurityPolicy)
 }
 
 // ServeHTTP logs requests and dispatches them to API routes.

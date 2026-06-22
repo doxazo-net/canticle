@@ -15,7 +15,8 @@ import (
 // setSecurityHeaders in isolation, so the load-bearing ordering (headers set
 // before dispatch) is exercised end to end.
 func TestSecurityHeadersOnEveryResponse(t *testing.T) {
-	const wantCSP = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'self'"
+	// Reference the single authoritative policy, not a duplicated literal.
+	const wantCSP = contentSecurityPolicy
 
 	h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics", WithWebUI(config.Config{}, "vtest"))
 
