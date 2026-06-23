@@ -3,7 +3,7 @@
         docs docs-serve docs-deps templ tailwind ui ui-check
 
 # Binary name
-BINARY=mxlrcgo-svc
+BINARY=canticle
 
 # Tailwind standalone CLI (v4). Override with `make ui TAILWIND=/path/to/tailwindcss`.
 # Install the single, node-free binary from

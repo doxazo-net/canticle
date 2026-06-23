@@ -9,7 +9,7 @@ import (
 
 func TestVersionStringUsesBuildDefaults(t *testing.T) {
 	got := VersionString()
-	for _, want := range []string{"mxlrcgo-svc", version, commit, date} {
+	for _, want := range []string{"canticle", version, commit, date} {
 		if !strings.Contains(got, want) {
 			t.Errorf("VersionString() = %q, missing %q", got, want)
 		}

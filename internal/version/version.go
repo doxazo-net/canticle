@@ -14,5 +14,5 @@ var (
 
 // VersionString renders the single line printed for --version.
 func VersionString() string {
-	return fmt.Sprintf("mxlrcgo-svc %s (commit %s, built %s)", Version, Commit, Date)
+	return fmt.Sprintf("canticle %s (commit %s, built %s)", Version, Commit, Date)
 }

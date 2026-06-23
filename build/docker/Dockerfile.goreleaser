@@ -3,7 +3,7 @@ FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6ee
 # KEEP IN SYNC with the runtime stage of the root Dockerfile (used by nightly.yml and the
 # ci.yml CVE scan): identical base digest, apk packages, user, ENV, EXPOSE, VOLUME, entrypoint.
 # The two differ only in how the binary arrives (copied here vs built in the root Dockerfile).
-LABEL org.opencontainers.image.source="https://github.com/sydlexius/mxlrcgo-svc" \
+LABEL org.opencontainers.image.source="https://github.com/sydlexius/canticle" \
       org.opencontainers.image.description="Fetch synced lyrics from Musixmatch and save .lrc files" \
       org.opencontainers.image.licenses="GPL-3.0" \
       net.unraid.docker.webui="http://[IP]:[PORT:50705]/"
@@ -19,7 +19,7 @@ RUN apk add --no-cache bash ca-certificates ffmpeg su-exec tzdata && \
 # each platform's binary under $TARGETPLATFORM/ in the build context.
 # extra_files (entrypoint.sh) keep their original relative path.
 ARG TARGETPLATFORM
-COPY $TARGETPLATFORM/mxlrcgo-svc /usr/local/bin/mxlrcgo-svc
+COPY $TARGETPLATFORM/canticle /usr/local/bin/canticle
 COPY build/docker/entrypoint.sh /entrypoint.sh
 # Make the entrypoint executable and pre-ship bash completion: generate the
 # static wrapper and source it from the system bashrc so interactive
@@ -28,8 +28,8 @@ COPY build/docker/entrypoint.sh /entrypoint.sh
 # one an interactive non-login shell reads here). We also write the conventional
 # /etc/bash.bashrc for robustness if the base image ever changes; both are guarded.
 RUN chmod +x /entrypoint.sh && \
-    mxlrcgo-svc completion bash > /etc/bash/mxlrcgo-svc.bash && \
-    printf '\n[ -f /etc/bash/mxlrcgo-svc.bash ] && . /etc/bash/mxlrcgo-svc.bash\n' \
+    canticle completion bash > /etc/bash/canticle.bash && \
+    printf '\n[ -f /etc/bash/canticle.bash ] && . /etc/bash/canticle.bash\n' \
       | tee -a /etc/bash/bashrc /etc/bash.bashrc > /dev/null
 
 ENV MXLRC_DOCKER=true \
@@ -42,4 +42,4 @@ VOLUME ["/config", "/music"]
 # USER is intentionally omitted so entrypoint.sh can perform PUID/PGID
 # remapping and volume ownership fixes as root before dropping to mxlrcgo.
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["mxlrcgo-svc", "serve"]
+CMD ["canticle", "serve"]
