@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <Container version="2">
-  <Name>Canticle</Name>
+  <Name>mxlrcgo-svc</Name>
   <Repository>ghcr.io/sydlexius/canticle</Repository>
   <Registry>https://github.com/sydlexius/canticle/pkgs/container/canticle</Registry>
   <TemplateURL>https://raw.githubusercontent.com/sydlexius/canticle/main/unraid/mxlrcgo-svc.xml</TemplateURL>
