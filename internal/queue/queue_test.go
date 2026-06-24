@@ -3138,6 +3138,49 @@ func TestDBQueue_SetProviderLane(t *testing.T) {
 	}
 }
 
+// TestDBQueue_SetOutcomeType verifies SetOutcomeType persists the recorded
+// outcome on a work_queue row through a real SQLite DB (#379).
+func TestDBQueue_SetOutcomeType(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.SetRandomized(false)
+	q.now = func() time.Time { return time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC) }
+
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "T"}}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	item, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+
+	// Fresh row: outcome_type is NULL until stamped.
+	var outcome *string
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT outcome_type FROM work_queue WHERE id = ?`, item.ID).Scan(&outcome); err != nil {
+		t.Fatalf("read initial outcome_type: %v", err)
+	}
+	if outcome != nil {
+		t.Fatalf("initial outcome_type = %v; want NULL", *outcome)
+	}
+
+	if err := q.SetOutcomeType(ctx, item.ID, "instrumental"); err != nil {
+		t.Fatalf("SetOutcomeType: %v", err)
+	}
+	if err := q.db.QueryRowContext(ctx,
+		`SELECT outcome_type FROM work_queue WHERE id = ?`, item.ID).Scan(&outcome); err != nil {
+		t.Fatalf("read outcome_type: %v", err)
+	}
+	if outcome == nil || *outcome != "instrumental" {
+		t.Errorf("outcome_type = %v; want instrumental", outcome)
+	}
+
+	// A missing id is a benign no-op (no error).
+	if err := q.SetOutcomeType(ctx, 999999, "synced"); err != nil {
+		t.Errorf("SetOutcomeType on missing id: want nil error, got %v", err)
+	}
+}
+
 // TestDBQueue_RecheckClosedDB verifies the recheck methods return a wrapped
 // error (rather than panicking) when the underlying handle is closed.
 func TestDBQueue_RecheckClosedDB(t *testing.T) {

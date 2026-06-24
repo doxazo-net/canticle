@@ -36,6 +36,7 @@ type workItem struct {
 	providerLane       any // string or nil
 	instrumentalResult any // int or nil
 	detectInstrumental any // int or nil
+	outcomeType        any // string ("synced"|"unsynced"|"instrumental") or nil
 }
 
 func insertWorkItem(t *testing.T, sqlDB *sql.DB, w workItem) int64 {
@@ -46,10 +47,10 @@ func insertWorkItem(t *testing.T, sqlDB *sql.DB, w workItem) int64 {
 	res, err := sqlDB.ExecContext(context.Background(),
 		`INSERT INTO work_queue
             (artist, title, artist_key, title_key, album, status, last_error, output_paths,
-             completed_at, provider_lane, instrumental_result, detect_instrumental)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             completed_at, provider_lane, instrumental_result, detect_instrumental, outcome_type)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		w.artist, w.title, w.artist, w.title, w.album, w.status, w.lastError, w.outputPaths,
-		w.completedAt, w.providerLane, w.instrumentalResult, w.detectInstrumental)
+		w.completedAt, w.providerLane, w.instrumentalResult, w.detectInstrumental, w.outcomeType)
 	if err != nil {
 		t.Fatalf("insert work_queue: %v", err)
 	}
@@ -169,16 +170,26 @@ func TestRecentOutcomesClassificationAndOrder(t *testing.T) {
 	sqlDB := openTestDB(t)
 	repo := reports.New(sqlDB)
 
+	// Classification is driven by outcome_type (the real written outcome stamped
+	// at completion, #379), NOT the output_paths filename extension. output_paths
+	// here deliberately disagrees with outcome_type (every row carries the stale
+	// enqueue-time ".lrc") to prove the extension is no longer consulted.
 	// Insert in scrambled completion order to verify DESC sort; one NULL
 	// completed_at must sort last.
 	insertWorkItem(t, sqlDB, workItem{
 		artist: "Synced", title: "S", album: "Al1", status: "done",
 		outputPaths: pathsJSON("song.lrc"), completedAt: "2026-06-10T10:00:00Z",
-		providerLane: "musixmatch",
+		providerLane: "musixmatch", outcomeType: "synced",
 	})
 	insertWorkItem(t, sqlDB, workItem{
 		artist: "Unsynced", title: "U", status: "done",
-		outputPaths: pathsJSON("song.txt"), completedAt: "2026-06-12T10:00:00Z",
+		outputPaths: pathsJSON("song.lrc"), completedAt: "2026-06-12T10:00:00Z",
+		outcomeType: "unsynced",
+	})
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "Instrumental", title: "I", status: "done",
+		outputPaths: pathsJSON("song.lrc"), completedAt: "2026-06-13T10:00:00Z",
+		outcomeType: "instrumental",
 	})
 	insertWorkItem(t, sqlDB, workItem{
 		artist: "Miss", title: "M", status: "done",
@@ -187,7 +198,7 @@ func TestRecentOutcomesClassificationAndOrder(t *testing.T) {
 	})
 	insertWorkItem(t, sqlDB, workItem{
 		artist: "Legacy", title: "L", status: "done",
-		outputPaths: "", completedAt: nil, // NULL completed_at, empty output_paths
+		outputPaths: "", completedAt: nil, // NULL completed_at, NULL outcome_type
 	})
 	// A non-done row must be excluded.
 	insertWorkItem(t, sqlDB, workItem{artist: "Pending", title: "P", status: "pending"})
@@ -196,8 +207,8 @@ func TestRecentOutcomesClassificationAndOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecentOutcomes: %v", err)
 	}
-	if len(got) != 4 {
-		t.Fatalf("got %d outcomes, want 4 (done only): %+v", len(got), got)
+	if len(got) != 5 {
+		t.Fatalf("got %d outcomes, want 5 (done only): %+v", len(got), got)
 	}
 
 	// Order: newest completed first, NULL completed_at last.
@@ -205,7 +216,8 @@ func TestRecentOutcomesClassificationAndOrder(t *testing.T) {
 		artist string
 		result reports.ResultClass
 	}{
-		{"Unsynced", reports.ResultUnsyncedOrInstrumental},
+		{"Instrumental", reports.ResultInstrumental},
+		{"Unsynced", reports.ResultUnsynced},
 		{"Miss", reports.ResultMiss},
 		{"Synced", reports.ResultSynced},
 		{"Legacy", reports.ResultUnknown},
@@ -220,7 +232,7 @@ func TestRecentOutcomesClassificationAndOrder(t *testing.T) {
 	}
 
 	// Field carry-through on the synced row.
-	synced := got[2]
+	synced := got[3]
 	if synced.Album != "Al1" || synced.ProviderLane != "musixmatch" {
 		t.Errorf("synced row fields = album %q lane %q, want Al1/musixmatch", synced.Album, synced.ProviderLane)
 	}
@@ -228,8 +240,8 @@ func TestRecentOutcomesClassificationAndOrder(t *testing.T) {
 		t.Errorf("synced CompletedAt = %v, want 2026-06-10T10:00:00Z", synced.CompletedAt)
 	}
 	// NULL completed_at -> zero time.
-	if !got[3].CompletedAt.IsZero() {
-		t.Errorf("legacy CompletedAt = %v, want zero", got[3].CompletedAt)
+	if !got[4].CompletedAt.IsZero() {
+		t.Errorf("legacy CompletedAt = %v, want zero", got[4].CompletedAt)
 	}
 }
 
@@ -377,17 +389,23 @@ func TestFailureAnalysis(t *testing.T) {
 // whose output_paths is NON-EMPTY but invalid JSON must classify as "unknown"
 // (the else branch) without erroring, proving json_valid short-circuits before
 // json_extract is ever evaluated on the malformed value.
-func TestRecentOutcomesMalformedJSON(t *testing.T) {
+// TestRecentOutcomesIgnoresOutputPaths verifies output_paths no longer
+// influences classification (#379): a row with garbage output_paths but a valid
+// outcome_type classifies by outcome_type, and a row with no outcome_type is
+// 'unknown' regardless of output_paths content. The query never parses
+// output_paths, so malformed JSON cannot error or misclassify.
+func TestRecentOutcomesIgnoresOutputPaths(t *testing.T) {
 	ctx := context.Background()
 	sqlDB := openTestDB(t)
 	repo := reports.New(sqlDB)
 
 	insertWorkItem(t, sqlDB, workItem{
-		artist: "Garbage", title: "G", status: "done",
+		artist: "GarbagePathsSynced", title: "G", status: "done",
 		outputPaths: "garbage", completedAt: "2026-06-12T10:00:00Z",
+		outcomeType: "synced",
 	})
 	insertWorkItem(t, sqlDB, workItem{
-		artist: "Truncated", title: "T", status: "done",
+		artist: "TruncatedNoOutcome", title: "T", status: "done",
 		outputPaths: "{", completedAt: "2026-06-11T10:00:00Z",
 	})
 
@@ -398,10 +416,11 @@ func TestRecentOutcomesMalformedJSON(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("got %d outcomes, want 2: %+v", len(got), got)
 	}
-	for _, o := range got {
-		if o.Result != reports.ResultUnknown {
-			t.Errorf("outcome %q Result = %q, want %q (json_valid else branch)", o.Artist, o.Result, reports.ResultUnknown)
-		}
+	if got[0].Result != reports.ResultSynced {
+		t.Errorf("garbage-output_paths row Result = %q, want %q (outcome_type wins)", got[0].Result, reports.ResultSynced)
+	}
+	if got[1].Result != reports.ResultUnknown {
+		t.Errorf("no-outcome_type row Result = %q, want %q", got[1].Result, reports.ResultUnknown)
 	}
 }
 
@@ -480,8 +499,10 @@ func TestQueryErrorsSurface(t *testing.T) {
 	}
 }
 
-// TestCountInstrumental verifies CountInstrumental returns the number of
-// work_queue rows with instrumental_result = 1, excluding other values.
+// TestCountInstrumental verifies CountInstrumental counts every row whose
+// recorded outcome is instrumental (outcome_type='instrumental'), regardless of
+// source -- audio-detected and provider-flagged alike -- not only rows with
+// instrumental_result=1 (#379).
 func TestCountInstrumental(t *testing.T) {
 	ctx := context.Background()
 	sqlDB := openTestDB(t)
@@ -496,18 +517,22 @@ func TestCountInstrumental(t *testing.T) {
 		t.Errorf("CountInstrumental = %d, want 0 on empty DB", n)
 	}
 
-	// Two confirmed instrumental, one not-instrumental (0), one not-run (nil).
-	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "i1", status: "done", instrumentalResult: 1})
-	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "i2", status: "done", instrumentalResult: 1})
-	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "v1", status: "done", instrumentalResult: 0})
-	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "n1", status: "done", instrumentalResult: nil})
+	// Audio-detected instrumental (both outcome_type and instrumental_result set).
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "audio", status: "done", outcomeType: "instrumental", instrumentalResult: 1})
+	// Provider-flagged instrumental: outcome_type set, instrumental_result NULL.
+	// This is the row the old instrumental_result=1 count missed.
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "provider", status: "done", outcomeType: "instrumental", instrumentalResult: nil})
+	// Non-instrumental outcomes must not be counted.
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "synced", status: "done", outcomeType: "synced"})
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "unsynced", status: "done", outcomeType: "unsynced"})
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "legacy", status: "done", outcomeType: nil})
 
 	n, err = repo.CountInstrumental(ctx)
 	if err != nil {
 		t.Fatalf("CountInstrumental: %v", err)
 	}
 	if n != 2 {
-		t.Errorf("CountInstrumental = %d, want 2 (only instrumental_result=1)", n)
+		t.Errorf("CountInstrumental = %d, want 2 (all instrumental outcomes, incl. provider-flagged)", n)
 	}
 }
 

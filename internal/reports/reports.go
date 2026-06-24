@@ -83,19 +83,20 @@ func (r *Repo) QueueSummary(ctx context.Context) (QueueSummary, error) {
 type ResultClass string
 
 const (
-	// ResultSynced means an .lrc (synced lyrics) file was written.
+	// ResultSynced means a synced .lrc file was written (outcome_type='synced').
 	ResultSynced ResultClass = "synced"
-	// ResultUnsyncedOrInstrumental means a .txt file was written. This groups
-	// plain unsynced lyrics and instrumental markers together: both land in a
-	// .txt output and are not distinguishable from output_paths alone (per the
-	// issue's Design Choice 2). Use InstrumentalInventory to isolate
-	// audio-detected instrumentals.
-	ResultUnsyncedOrInstrumental ResultClass = "unsynced-or-instrumental"
+	// ResultUnsynced means an unsynced .txt lyrics file was written
+	// (outcome_type='unsynced').
+	ResultUnsynced ResultClass = "unsynced"
+	// ResultInstrumental means an instrumental .txt marker was written
+	// (outcome_type='instrumental'), from any source -- audio-detected or
+	// provider-flagged.
+	ResultInstrumental ResultClass = "instrumental"
 	// ResultMiss means the item exhausted its miss budget with no lyrics found
 	// (status='done', last_error='miss limit reached', no output written).
 	ResultMiss ResultClass = "miss"
-	// ResultUnknown means the row could not be classified (e.g. legacy row with
-	// no/empty output_paths and no miss marker).
+	// ResultUnknown means the row could not be classified: a legacy row that
+	// predates the outcome_type column (NULL outcome_type) and is not a miss.
 	ResultUnknown ResultClass = "unknown"
 )
 
@@ -118,11 +119,12 @@ type RecentOutcome struct {
 // newest first by completed_at (NULLs sorted last), capped at limit.
 //
 // Source: work_queue rows where status='done'. The result classification is
-// computed in SQL: last_error='miss limit reached' -> miss; otherwise the first
-// output filename (json_extract(output_paths, '$[0].filename')) ending in .lrc
-// -> synced, .txt -> unsynced-or-instrumental (grouped, see ResultClass),
-// anything else -> unknown. json_valid guards legacy rows whose output_paths is
-// empty/non-JSON so json_extract never errors.
+// computed in SQL from the recorded outcome_type (stamped at completion, #379),
+// NOT the output_paths filename: last_error='miss limit reached' -> miss;
+// otherwise outcome_type 'synced'/'unsynced'/'instrumental' map to the matching
+// ResultClass; a NULL outcome_type (a legacy row predating the column) -> unknown.
+// output_paths is no longer consulted -- it holds the stale enqueue-time .lrc
+// plan, which is what made every completed row read as synced before this fix.
 func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -131,10 +133,9 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
 		`SELECT artist, title, album, completed_at, provider_lane,
             CASE
                 WHEN last_error = 'miss limit reached' THEN 'miss'
-                WHEN json_valid(output_paths)
-                    AND json_extract(output_paths, '$[0].filename') LIKE '%.lrc' THEN 'synced'
-                WHEN json_valid(output_paths)
-                    AND json_extract(output_paths, '$[0].filename') LIKE '%.txt' THEN 'unsynced-or-instrumental'
+                WHEN outcome_type = 'synced' THEN 'synced'
+                WHEN outcome_type = 'unsynced' THEN 'unsynced'
+                WHEN outcome_type = 'instrumental' THEN 'instrumental'
                 ELSE 'unknown'
             END AS result
          FROM work_queue
@@ -292,12 +293,15 @@ func (r *Repo) InstrumentalInventory(ctx context.Context) ([]InstrumentalTrack, 
 	return out, nil
 }
 
-// CountInstrumental returns the number of work_queue rows the audio detector
-// confirmed as instrumental (instrumental_result = 1).
+// CountInstrumental returns the number of completed work_queue rows whose
+// recorded outcome is instrumental (outcome_type = 'instrumental'), counting
+// every source -- audio-detected and provider-flagged -- not only rows the
+// audio detector set instrumental_result=1 on (#379). InstrumentalInventory
+// still isolates the audio-detected subset for the inventory view.
 func (r *Repo) CountInstrumental(ctx context.Context) (int64, error) {
 	var n int64
 	if err := r.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM work_queue WHERE instrumental_result = 1`).Scan(&n); err != nil {
+		`SELECT COUNT(*) FROM work_queue WHERE outcome_type = 'instrumental'`).Scan(&n); err != nil {
 		return 0, fmt.Errorf("reports: count instrumental: %w", err)
 	}
 	return n, nil

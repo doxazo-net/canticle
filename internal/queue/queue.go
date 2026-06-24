@@ -1114,6 +1114,24 @@ func (q *DBQueue) SetInstrumentalResult(ctx context.Context, id int64, result in
 	return nil
 }
 
+// SetOutcomeType records what was actually written for a work_queue row
+// ("synced" | "unsynced" | "instrumental") so reports classify by the real
+// outcome instead of the enqueue-time output_paths filename, which is always
+// the planned .lrc and is never updated at completion (#379). The worker calls
+// this before Complete while the row is still in 'processing'; the UPDATE keys
+// on id alone (no status guard, matching SetInstrumentalResult), and is a no-op
+// for a missing id, which is benign.
+func (q *DBQueue) SetOutcomeType(ctx context.Context, id int64, outcomeType string) error {
+	_, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue SET outcome_type = ? WHERE id = ?`,
+		outcomeType, id,
+	)
+	if err != nil {
+		return fmt.Errorf("queue: set outcome type for id %d: %w", id, err)
+	}
+	return nil
+}
+
 // ProviderHits returns a map from lane name to cumulative hit count. Lanes that
 // have never recorded a hit are omitted.
 func (q *DBQueue) ProviderHits(ctx context.Context) (map[string]int64, error) {

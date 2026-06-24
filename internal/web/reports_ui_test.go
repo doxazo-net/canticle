@@ -36,14 +36,24 @@ func newReportsUIServer(t *testing.T, sqlDB *sql.DB) *http.ServeMux {
 
 // insertDone inserts one completed work_queue row with the given output_paths
 // JSON and provider lane, so the Recent outcomes report has something to derive.
+// outcome_type is stamped from the output filename extension (.lrc -> synced,
+// .txt -> unsynced) to mirror what the worker records at completion, since
+// reports now classify by outcome_type rather than the filename (#379).
 func insertDone(t *testing.T, sqlDB *sql.DB, title, lane, outputPaths, completedAt string) {
 	t.Helper()
+	var outcomeType any // NULL unless the filename tells us the type
+	switch {
+	case strings.Contains(outputPaths, ".lrc"):
+		outcomeType = "synced"
+	case strings.Contains(outputPaths, ".txt"):
+		outcomeType = "unsynced"
+	}
 	_, err := sqlDB.ExecContext(context.Background(),
 		`INSERT INTO work_queue
             (artist, title, artist_key, title_key, album, status, last_error,
-             output_paths, completed_at, provider_lane)
-         VALUES (?, ?, ?, ?, ?, 'done', '', ?, ?, ?)`,
-		"Artist", title, "Artist", title, "Album", outputPaths, completedAt, lane)
+             output_paths, completed_at, provider_lane, outcome_type)
+         VALUES (?, ?, ?, ?, ?, 'done', '', ?, ?, ?, ?)`,
+		"Artist", title, "Artist", title, "Album", outputPaths, completedAt, lane, outcomeType)
 	if err != nil {
 		t.Fatalf("insert done work_queue: %v", err)
 	}
