@@ -40,6 +40,13 @@ type Queue interface {
 	// row. result=1 means instrumental confirmed; result=0 means not instrumental.
 	// Call before Complete while the row is still in processing status.
 	SetInstrumentalResult(ctx context.Context, id int64, result int) error
+	// SetOutcomeType records what was actually written for a completed row
+	// ("synced" | "unsynced" | "instrumental"), so reports classify by the real
+	// outcome instead of the enqueue-time output_paths filename, which is always
+	// the planned .lrc and never updated at completion (#379). Call before
+	// Complete while the row is still in processing status; an empty type is a
+	// no-op (the row keeps NULL outcome_type, classified as "unknown").
+	SetOutcomeType(ctx context.Context, id int64, outcomeType string) error
 	// SetProviderLane stamps the winning provider lane name onto a work_queue row
 	// for per-track provenance. Call at completion time before Complete so the row
 	// permanently records which provider served it. An empty lane is a no-op.
@@ -514,6 +521,26 @@ func (w *Worker) guardReject(_ queue.WorkItem, song models.Song) (bool, string) 
 	return !ok, reason
 }
 
+// outcomeTypeFromSong derives the completion outcome ("synced" | "unsynced" |
+// "instrumental") from what WriteLRC will actually write for this song. The
+// ordering mirrors WriteLRC exactly and is load-bearing: the instrumental flag
+// is authoritative and must be checked first, because Musixmatch delivers a
+// synced subtitle line alongside the instrumental flag, so a subtitles-first
+// check would mislabel a provider-flagged instrumental as synced. An empty
+// string means nothing writable (the caller leaves outcome_type NULL).
+func outcomeTypeFromSong(song models.Song) string {
+	switch {
+	case song.Track.Instrumental == 1:
+		return "instrumental"
+	case len(song.Subtitles.Lines) > 0:
+		return "synced"
+	case song.Lyrics.LyricsBody != "":
+		return "unsynced"
+	default:
+		return ""
+	}
+}
+
 // Run processes ready work items until the queue is empty or the context ends.
 func (w *Worker) Run(ctx context.Context) error {
 	return w.run(ctx, nil)
@@ -694,6 +721,13 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 					}
 				}
 				ctxNoCancel := context.WithoutCancel(ctx)
+				// Record the written outcome before Complete so reports count this
+				// (and every other instrumental source) as instrumental, not just
+				// rows with instrumental_result=1 (#379). Non-fatal, like the
+				// instrumental_result stamp above.
+				if stampErr := w.queue.SetOutcomeType(ctxNoCancel, item.ID, "instrumental"); stampErr != nil {
+					slog.Warn("worker instrumental detection: stamp outcome type failed; continuing", "id", item.ID, "error", stampErr)
+				}
 				if completeErr := w.queue.Complete(ctxNoCancel, item.ID); completeErr != nil {
 					cause := fmt.Errorf("worker: complete instrumental item %d: %w", item.ID, completeErr)
 					w.consecutiveFailures++
@@ -790,6 +824,17 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	}
 
 	ctxNoCancel := context.WithoutCancel(ctx)
+	// Record what was actually written (synced/unsynced/instrumental) before
+	// Complete so reports classify by the real outcome instead of the
+	// enqueue-time .lrc plan (#379). outcomeTypeFromSong mirrors WriteLRC's
+	// branching; an empty result (nothing writable -- shouldn't reach here on
+	// the success path) leaves outcome_type NULL. Non-fatal, like the other
+	// pre-Complete stamps.
+	if outcome := outcomeTypeFromSong(song); outcome != "" {
+		if stampErr := w.queue.SetOutcomeType(ctxNoCancel, item.ID, outcome); stampErr != nil {
+			slog.Warn("worker: stamp outcome type failed; continuing", "id", item.ID, "error", stampErr)
+		}
+	}
 	if err := w.queue.Complete(ctxNoCancel, item.ID); err != nil {
 		cause := fmt.Errorf("worker: complete item %d: %w", item.ID, err)
 		w.consecutiveFailures++

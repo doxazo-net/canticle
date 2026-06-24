@@ -104,6 +104,7 @@ type fakeQueue struct {
 	released           []int64
 	deferred           []int64
 	retired            []int64
+	outcomeTypes       map[int64]string
 	failCauses         []error
 	deferCauses        []error
 	deferDurations     []time.Duration
@@ -174,6 +175,14 @@ func (q *fakeQueue) RetireMiss(_ context.Context, id int64) (queue.WorkItem, err
 }
 
 func (q *fakeQueue) SetInstrumentalResult(_ context.Context, _ int64, _ int) error {
+	return nil
+}
+
+func (q *fakeQueue) SetOutcomeType(_ context.Context, id int64, outcomeType string) error {
+	if q.outcomeTypes == nil {
+		q.outcomeTypes = make(map[int64]string)
+	}
+	q.outcomeTypes[id] = outcomeType
 	return nil
 }
 
@@ -2253,5 +2262,131 @@ func TestRecordMissesRecorderErrorIsNonFatal(t *testing.T) {
 	// The recorder WAS called (iteration continued despite the error).
 	if len(rec.misses) != 1 || rec.misses[0] != "musixmatch" {
 		t.Errorf("misses = %v; want [musixmatch] (recorder called even if it errors)", rec.misses)
+	}
+}
+
+// TestOutcomeTypeFromSong verifies the helper mirrors WriteLRC's branching
+// exactly, including that an instrumental flag wins over a present synced
+// subtitle line (Musixmatch delivers a synced line alongside the instrumental
+// flag, so instrumental must be checked first). The empty case (nothing
+// writable) returns "" so the caller leaves outcome_type NULL.
+func TestOutcomeTypeFromSong(t *testing.T) {
+	tests := []struct {
+		name string
+		song models.Song
+		want string
+	}{
+		{
+			name: "instrumental flag wins even with a synced line present",
+			song: models.Song{
+				Track:     models.Track{Instrumental: 1},
+				Subtitles: models.Synced{Lines: []models.Lines{{Text: "la la"}}},
+			},
+			want: "instrumental",
+		},
+		{
+			name: "synced when subtitle lines present",
+			song: models.Song{Subtitles: models.Synced{Lines: []models.Lines{{Text: "la la"}}}},
+			want: "synced",
+		},
+		{
+			name: "unsynced when only a lyrics body is present",
+			song: models.Song{Lyrics: models.Lyrics{LyricsBody: "plain words"}},
+			want: "unsynced",
+		},
+		{
+			name: "empty when nothing writable",
+			song: models.Song{},
+			want: "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := outcomeTypeFromSong(tc.song); got != tc.want {
+				t.Fatalf("outcomeTypeFromSong = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunOnceStampsOutcomeTypeOnSuccess verifies the normal success path stamps
+// the true outcome type (here "unsynced", because the fetched song carries only
+// a lyrics body) before completing -- the fix for issue #379, where the
+// dashboard read every completed row as synced.
+func TestRunOnceStampsOutcomeTypeOnSuccess(t *testing.T) {
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID:     7,
+		Inputs: models.Inputs{Track: track},
+	}}}
+	cache := &fakeCache{}
+	fetcher := &fakeFetcher{song: models.Song{
+		Track:  track,
+		Lyrics: models.Lyrics{LyricsBody: "fresh lyrics"},
+	}}
+	writer := &fakeWriter{}
+
+	w := New(q, cache, fetcher, writer)
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(q.completed) != 1 || q.completed[0] != 7 {
+		t.Fatalf("completed = %v; want [7]", q.completed)
+	}
+	if got := q.outcomeTypes[7]; got != "unsynced" {
+		t.Fatalf("outcome_type for id 7 = %q; want \"unsynced\"", got)
+	}
+}
+
+// TestRunOnceStampsSyncedOutcomeType verifies a synced fetch (subtitle lines)
+// stamps "synced".
+func TestRunOnceStampsSyncedOutcomeType(t *testing.T) {
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID:     8,
+		Inputs: models.Inputs{Track: track},
+	}}}
+	fetcher := &fakeFetcher{song: models.Song{
+		Track:     track,
+		Subtitles: models.Synced{Lines: []models.Lines{{Text: "timed line"}}},
+	}}
+	w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if got := q.outcomeTypes[8]; got != "synced" {
+		t.Fatalf("outcome_type for id 8 = %q; want \"synced\"", got)
+	}
+}
+
+// TestRunOnceDetectorInstrumentalStampsOutcomeType verifies the audio-detector
+// instrumental path stamps outcome_type "instrumental" before completing, so
+// every instrumental source (not just instrumental_result) is tabulated.
+func TestRunOnceDetectorInstrumentalStampsOutcomeType(t *testing.T) {
+	track := models.Track{ArtistName: "Composer", TrackName: "Silent Piece"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID: 9,
+		Inputs: models.Inputs{
+			Track:      track,
+			Outdir:     "out",
+			Filename:   "silent.lrc",
+			SourcePath: "/music/silent.flac",
+		},
+	}}}
+	fetcher := &fakeFetcher{err: musixmatch.ErrNotFound}
+	det := &fakeDetector{instrumental: true}
+
+	w := New(q, &fakeCache{}, fetcher, &fakeWriter{})
+	w.EnableAudioDetector(det)
+	w.SetInstrumentalDetectionDefault(true)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(q.completed) != 1 || q.completed[0] != 9 {
+		t.Fatalf("completed = %v; want [9]", q.completed)
+	}
+	if got := q.outcomeTypes[9]; got != "instrumental" {
+		t.Fatalf("outcome_type for id 9 = %q; want \"instrumental\"", got)
 	}
 }
