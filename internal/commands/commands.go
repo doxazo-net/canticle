@@ -1399,7 +1399,11 @@ func newAudioDetector(cfg config.Config, ffmpegPath string) (detector.Detector, 
 		SampleDurationSeconds: cfg.InstrumentalDetector.SampleDurationSeconds,
 		MinConfidence:         cfg.InstrumentalDetector.MinConfidence,
 		InstrumentalClasses:   cfg.InstrumentalDetector.InstrumentalClasses,
+		VocalClasses:          cfg.InstrumentalDetector.VocalClasses,
+		VocalMaxConfidence:    cfg.InstrumentalDetector.VocalMaxConfidence,
+		SpreadSamples:         cfg.InstrumentalDetector.SpreadSamples,
 		FFmpegPath:            ffmpegPath,
+		FFprobePath:           cfg.InstrumentalDetector.FFprobePath,
 		CooldownSeconds:       cfg.InstrumentalDetector.CooldownSeconds,
 	})
 }
