@@ -101,6 +101,22 @@ func NewHTTPDetector(cfg Config) (*HTTPDetector, error) {
 	if cooldownSeconds < 0 {
 		cooldownSeconds = 0
 	}
+	// Default the vocal-gate fields so the constructor honors its documented
+	// contract and no construction path can silently disable the gate (an empty
+	// vocalClasses or a zero vocalMaxConfidence would otherwise neuter it). This
+	// mirrors the in-constructor defaulting of instrumentalClasses/minConfidence.
+	vocalClasses := cfg.VocalClasses
+	if len(vocalClasses) == 0 {
+		vocalClasses = defaultVocalClasses
+	}
+	vocalMaxConfidence := cfg.VocalMaxConfidence
+	if vocalMaxConfidence <= 0 || vocalMaxConfidence > 1 {
+		vocalMaxConfidence = defaultVocalMaxConfidence
+	}
+	spreadSamples := cfg.SpreadSamples
+	if spreadSamples == 0 {
+		spreadSamples = defaultSpreadSamples
+	}
 	// ionice is Linux-specific (I/O scheduler class control). nice is POSIX but
 	// not guaranteed to be installed (e.g. a stripped container, or Windows).
 	// Resolve both up front; an empty path means the wrapper is skipped silently
@@ -112,9 +128,9 @@ func NewHTTPDetector(cfg Config) (*HTTPDetector, error) {
 		sampleDuration:      sampleDurationSeconds,
 		minConfidence:       minConfidence,
 		instrumentalClasses: classes,
-		vocalClasses:        cfg.VocalClasses,
-		vocalMaxConfidence:  cfg.VocalMaxConfidence,
-		spreadSamples:       cfg.SpreadSamples,
+		vocalClasses:        vocalClasses,
+		vocalMaxConfidence:  vocalMaxConfidence,
+		spreadSamples:       spreadSamples,
 		ffmpegPath:          resolvedFFmpegPath,
 		ffprobePath:         ffprobePath,
 		ionicePath:          ionicePath,

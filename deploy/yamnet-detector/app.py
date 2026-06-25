@@ -20,6 +20,7 @@ clip's frames:
 
 import csv
 import io
+import logging
 from contextlib import asynccontextmanager
 
 import numpy as np
@@ -30,6 +31,8 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 
 YAMNET_HANDLE = "https://tfhub.dev/google/yamnet/1"
 TARGET_SR = 16000  # YAMNet requires 16 kHz mono
+
+logger = logging.getLogger("canticle.yamnet")
 
 _state: dict = {}
 
@@ -67,6 +70,7 @@ async def classify(file: UploadFile = File(...)):
     try:
         wav, sr = sf.read(io.BytesIO(raw), dtype="float32")
     except Exception as e:  # noqa: BLE001 - surface a clean 400 to the caller
+        logger.warning("classify: cannot read audio: %s", e)
         raise HTTPException(status_code=400, detail=f"cannot read audio: {e}")
 
     # Fold to mono.
@@ -88,7 +92,11 @@ async def classify(file: UploadFile = File(...)):
     if wav.size == 0:
         raise HTTPException(status_code=400, detail="empty audio")
 
-    scores, _embeddings, _spectrogram = _state["model"](wav)
+    try:
+        scores, _embeddings, _spectrogram = _state["model"](wav)
+    except Exception as e:  # noqa: BLE001 - inference failure is a 500, but log it
+        logger.exception("classify: inference failed")
+        raise HTTPException(status_code=500, detail=f"inference failed: {e}")
     arr = scores.numpy()  # frames x num_classes
     mean_scores = np.mean(arr, axis=0)  # per-class mean over frames (music gate)
     max_scores = np.max(arr, axis=0)  # per-class peak over frames (vocal gate)

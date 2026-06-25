@@ -34,6 +34,20 @@ const (
 	maxSampleDurationSeconds = 60
 )
 
+// Detector defaults applied by NewHTTPDetector when the corresponding Config
+// field is zero/blank/out-of-range. These mirror the config-layer defaults in
+// internal/config (which is the user-facing default surface); the constructor
+// re-applies them so any construction path -- direct, test, or an env override
+// that lands an empty value -- still gets a working vocal gate rather than one
+// silently disabled. Kept in sync with config.defaults() by convention, the same
+// way the instrumental-class default is duplicated.
+const (
+	defaultVocalMaxConfidence = 0.03
+	defaultSpreadSamples      = 6
+)
+
+var defaultVocalClasses = []string{"Singing", "Vocal music", "Choir", "A capella", "Chant", "Rapping", "Child singing", "Synthetic singing", "Yodeling", "Humming"}
+
 // Result describes an instrumental detection decision.
 type Result struct {
 	// Instrumental is true only when the summed mean probability of the

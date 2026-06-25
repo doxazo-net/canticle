@@ -755,3 +755,29 @@ func TestDetectUsesSpreadSampleWhenDurationKnown(t *testing.T) {
 		t.Fatalf("music high, vocal low must be instrumental; got vocal_peak=%.3f", res.VocalConfidence)
 	}
 }
+
+func TestNewHTTPDetectorDefaultsVocalGate(t *testing.T) {
+	// A minimal Config must yield a working vocal gate (the constructor honors its
+	// documented defaulting), not a silently-disabled one.
+	d, err := NewHTTPDetector(Config{ClassifierURL: "http://c:8080", FFmpegPath: fakeFFmpeg(t)})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	if d.vocalMaxConfidence != 0.03 {
+		t.Errorf("vocalMaxConfidence = %v; want 0.03 (defaulted)", d.vocalMaxConfidence)
+	}
+	if d.spreadSamples != 6 {
+		t.Errorf("spreadSamples = %d; want 6 (defaulted)", d.spreadSamples)
+	}
+	if len(d.vocalClasses) == 0 || d.vocalClasses[0] != "Singing" {
+		t.Errorf("vocalClasses = %v; want defaulted list starting with Singing", d.vocalClasses)
+	}
+	// Out-of-range vocalMaxConfidence resets to the default, mirroring minConfidence.
+	d2, err := NewHTTPDetector(Config{ClassifierURL: "http://c:8080", FFmpegPath: fakeFFmpeg(t), VocalMaxConfidence: 1.5})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	if d2.vocalMaxConfidence != 0.03 {
+		t.Errorf("vocalMaxConfidence = %v; want 0.03 (out-of-range reset)", d2.vocalMaxConfidence)
+	}
+}
