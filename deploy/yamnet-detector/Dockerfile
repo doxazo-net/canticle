@@ -1,4 +1,9 @@
-FROM python:3.11-slim
+# Pinned by digest (Scorecard Pinned-Dependencies). The tag is kept for
+# readability; Docker resolves by the digest. Update both together -- use the
+# multi-arch manifest-list (index) digest, NOT a local arch-specific one, so the
+# pin resolves on any build arch:
+#   docker buildx imagetools inspect python:3.11-slim --format '{{.Manifest.Digest}}'
+FROM python:3.11-slim@sha256:cdbd05fb6f457ca275ff51ce00d93d865ca0b6a25f5ffb08262d94f6835771e5
 
 # libsndfile is the native backend soundfile needs to decode the WAV samples.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -8,7 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# --require-hashes enforces the sha256 hashes in the fully-pinned requirements.txt
+# (Scorecard Pinned-Dependencies). requirements.txt is generated from
+# requirements.in -- see the header in that file to regenerate.
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 COPY app.py .
 
