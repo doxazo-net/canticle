@@ -40,6 +40,24 @@ make scan                # build the Docker image and scan it for HIGH+ CVEs (ne
 make sync-tool-versions  # assert the golangci-lint and grype pins match across CI and local
 ```
 
+### Coverage floor (one-way ratchet)
+
+`make coverage-floor` (`scripts/coverage-floor.sh`) enforces a per-package floor recorded in `scripts/coverage-floor.json`: a PR that drops any `internal/` package below its floor fails the check, even if Codecov's patch coverage passes. It complements patch coverage (which only sees changed lines) by guarding whole-package regressions. The script is pure awk (no `jq`) and reuses the test step's coverage profile via `COVER_OUT` when one is supplied.
+
+Floors move **one way at a time**, per package, never via a bulk overwrite:
+
+```sh
+# After adding tests that genuinely raise a package's coverage, ratchet its
+# floor up to the new measured value (refuses to lower):
+bash scripts/coverage-floor.sh --bump internal/<pkg>
+
+# Only for a PR that removes dead (uncovered) code and so legitimately lowers
+# the ratio (refuses if current >= floor; the PR must explain the removal):
+bash scripts/coverage-floor.sh --lower internal/<pkg>
+```
+
+Ratchet to *current actuals*, not aspirational targets - do not nickel-and-dime coverage on defensive or unreachable branches. `internal/web` is intentionally excluded (its tests need the `make ui` CSS asset, so they can't run in a bare `go test`); Codecov covers it. Commit the `--bump`/`--lower` JSON change in the same PR that earned it, citing the change in the commit message.
+
 ## Documentation site
 
 The documentation site (this site) is built with [ProperDocs](https://github.com/properdocs/properdocs), a maintained drop-in continuation of MkDocs 1.x, using the Material theme. The pages live under `docs/` and the config is `properdocs.yml` at the repo root.
