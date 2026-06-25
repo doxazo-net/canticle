@@ -1394,14 +1394,18 @@ func newAudioDetector(cfg config.Config, ffmpegPath string) (detector.Detector, 
 	if strings.TrimSpace(cfg.InstrumentalDetector.ClassifierURL) == "" {
 		return nil, nil
 	}
-	return detector.NewHTTPDetector(
-		cfg.InstrumentalDetector.ClassifierURL,
-		cfg.InstrumentalDetector.SampleDurationSeconds,
-		cfg.InstrumentalDetector.MinConfidence,
-		cfg.InstrumentalDetector.InstrumentalClasses,
-		ffmpegPath,
-		cfg.InstrumentalDetector.CooldownSeconds,
-	)
+	return detector.NewHTTPDetector(detector.Config{
+		ClassifierURL:         cfg.InstrumentalDetector.ClassifierURL,
+		SampleDurationSeconds: cfg.InstrumentalDetector.SampleDurationSeconds,
+		MinConfidence:         cfg.InstrumentalDetector.MinConfidence,
+		InstrumentalClasses:   cfg.InstrumentalDetector.InstrumentalClasses,
+		VocalClasses:          cfg.InstrumentalDetector.VocalClasses,
+		VocalMaxConfidence:    cfg.InstrumentalDetector.VocalMaxConfidence,
+		SpreadSamples:         cfg.InstrumentalDetector.SpreadSamples,
+		FFmpegPath:            ffmpegPath,
+		FFprobePath:           cfg.InstrumentalDetector.FFprobePath,
+		CooldownSeconds:       cfg.InstrumentalDetector.CooldownSeconds,
+	})
 }
 
 // configureWorkerAudioDetector wires the detector into the worker. It is a

@@ -36,14 +36,14 @@ func TestHTTPDetectorAboveThresholdIsInstrumental(t *testing.T) {
 		if r.URL.Path != "/classify" {
 			t.Fatalf("path = %q; want /classify", r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]float64{
-			"Music":              0.70,
-			"Musical instrument": 0.25,
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"mean": map[string]float64{"Music": 0.70, "Musical instrument": 0.25},
+			"max":  map[string]float64{"Music": 1.0, "Singing": 0.01},
 		})
 	}))
 	defer srv.Close()
 
-	d, err := NewHTTPDetector(srv.URL, 30, 0.90, []string{"Music", "Musical instrument"}, ffmpegPath, 0)
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, SampleDurationSeconds: 30, MinConfidence: 0.90, InstrumentalClasses: []string{"Music", "Musical instrument"}, VocalClasses: []string{"Singing"}, VocalMaxConfidence: 0.05, FFmpegPath: ffmpegPath})
 	if err != nil {
 		t.Fatalf("NewHTTPDetector: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestHTTPDetectorBelowThresholdIsMiss(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, err := NewHTTPDetector(srv.URL, 30, 0.90, []string{"Music", "Musical instrument"}, ffmpegPath, 0)
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, SampleDurationSeconds: 30, MinConfidence: 0.90, InstrumentalClasses: []string{"Music", "Musical instrument"}, VocalClasses: []string{"Singing"}, VocalMaxConfidence: 0.05, FFmpegPath: ffmpegPath})
 	if err != nil {
 		t.Fatalf("NewHTTPDetector: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestHTTPDetectorHummingGrayZoneIsMiss(t *testing.T) {
 	defer srv.Close()
 
 	// Use a high threshold (0.90) so the gray zone (0.85 combined) is a miss.
-	d, err := NewHTTPDetector(srv.URL, 30, 0.90, []string{"Music", "Musical instrument"}, ffmpegPath, 0)
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, SampleDurationSeconds: 30, MinConfidence: 0.90, InstrumentalClasses: []string{"Music", "Musical instrument"}, VocalClasses: []string{"Singing"}, VocalMaxConfidence: 0.05, FFmpegPath: ffmpegPath})
 	if err != nil {
 		t.Fatalf("NewHTTPDetector: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestNewHTTPDetectorClampsSampleDuration(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			d, err := NewHTTPDetector("http://classifier:8080", tc.duration, 0.90, nil, ffmpegPath, 0)
+			d, err := NewHTTPDetector(Config{ClassifierURL: "http://classifier:8080", SampleDurationSeconds: tc.duration, MinConfidence: 0.90, FFmpegPath: ffmpegPath})
 			if err != nil {
 				t.Fatalf("NewHTTPDetector: %v", err)
 			}
@@ -180,7 +180,7 @@ func TestNewHTTPDetectorClampsSampleDuration(t *testing.T) {
 }
 
 func TestNewHTTPDetectorErrorsWhenFFmpegMissing(t *testing.T) {
-	_, err := NewHTTPDetector("http://classifier:8080", 30, 0.90, nil, filepath.Join(t.TempDir(), "missing-ffmpeg"), 0)
+	_, err := NewHTTPDetector(Config{ClassifierURL: "http://classifier:8080", SampleDurationSeconds: 30, MinConfidence: 0.90, FFmpegPath: filepath.Join(t.TempDir(), "missing-ffmpeg")})
 	if err == nil {
 		t.Fatal("NewHTTPDetector returned nil error; want missing ffmpeg error")
 	}
@@ -188,7 +188,7 @@ func TestNewHTTPDetectorErrorsWhenFFmpegMissing(t *testing.T) {
 
 func TestNewHTTPDetectorErrorsOnBlankURL(t *testing.T) {
 	ffmpegPath := fakeFFmpeg(t)
-	_, err := NewHTTPDetector("", 30, 0.90, nil, ffmpegPath, 0)
+	_, err := NewHTTPDetector(Config{ClassifierURL: "", SampleDurationSeconds: 30, MinConfidence: 0.90, FFmpegPath: ffmpegPath})
 	if err == nil {
 		t.Fatal("NewHTTPDetector returned nil error; want empty URL error")
 	}
@@ -230,7 +230,7 @@ func TestHTTPDetectorPostsAudioToClassifier(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, err := NewHTTPDetector(srv.URL, 30, 0.90, []string{"Music"}, ffmpegPath, 0)
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, SampleDurationSeconds: 30, MinConfidence: 0.90, InstrumentalClasses: []string{"Music"}, FFmpegPath: ffmpegPath})
 	if err != nil {
 		t.Fatalf("NewHTTPDetector: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestHTTPDetectorClassifierErrorIsMiss(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, err := NewHTTPDetector(srv.URL, 30, 0.90, nil, ffmpegPath, 0)
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, SampleDurationSeconds: 30, MinConfidence: 0.90, FFmpegPath: ffmpegPath})
 	if err != nil {
 		t.Fatalf("NewHTTPDetector: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestHTTPDetectorNon2xxReturnsClassifierUnavailable(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			d, err := NewHTTPDetector(srv.URL, 30, 0.90, nil, ffmpegPath, 0)
+			d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, SampleDurationSeconds: 30, MinConfidence: 0.90, FFmpegPath: ffmpegPath})
 			if err != nil {
 				t.Fatalf("NewHTTPDetector: %v", err)
 			}
@@ -309,7 +309,7 @@ func TestHTTPDetectorMalformedJSONReturnsInvalidResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, err := NewHTTPDetector(srv.URL, 30, 0.90, nil, ffmpegPath, 0)
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, SampleDurationSeconds: 30, MinConfidence: 0.90, FFmpegPath: ffmpegPath})
 	if err != nil {
 		t.Fatalf("NewHTTPDetector: %v", err)
 	}
@@ -343,7 +343,7 @@ func TestHTTPDetectorContextCancelDuringHTTP(t *testing.T) {
 		srv.Close()
 	}()
 
-	d, err := NewHTTPDetector(srv.URL, 30, 0.90, nil, ffmpegPath, 0)
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, SampleDurationSeconds: 30, MinConfidence: 0.90, FFmpegPath: ffmpegPath})
 	if err != nil {
 		t.Fatalf("NewHTTPDetector: %v", err)
 	}
@@ -368,14 +368,14 @@ func TestHTTPDetectorClearlyAboveThresholdIsInstrumental(t *testing.T) {
 
 	// Well above the threshold (0.95 > 0.90): must be instrumental.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]float64{
-			"Music":              0.95,
-			"Musical instrument": 0.00,
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"mean": map[string]float64{"Music": 0.95, "Musical instrument": 0.00},
+			"max":  map[string]float64{"Music": 1.0, "Singing": 0.005},
 		})
 	}))
 	defer srv.Close()
 
-	d, err := NewHTTPDetector(srv.URL, 30, 0.90, []string{"Music", "Musical instrument"}, ffmpegPath, 0)
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, SampleDurationSeconds: 30, MinConfidence: 0.90, InstrumentalClasses: []string{"Music", "Musical instrument"}, VocalClasses: []string{"Singing"}, VocalMaxConfidence: 0.05, FFmpegPath: ffmpegPath})
 	if err != nil {
 		t.Fatalf("NewHTTPDetector: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestHTTPDetectorJustBelowThresholdIsMiss(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d, err := NewHTTPDetector(srv.URL, 30, 0.90, []string{"Music", "Musical instrument"}, ffmpegPath, 0)
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, SampleDurationSeconds: 30, MinConfidence: 0.90, InstrumentalClasses: []string{"Music", "Musical instrument"}, VocalClasses: []string{"Singing"}, VocalMaxConfidence: 0.05, FFmpegPath: ffmpegPath})
 	if err != nil {
 		t.Fatalf("NewHTTPDetector: %v", err)
 	}
@@ -423,7 +423,7 @@ func TestHTTPDetectorDefaultMinConfidenceOnInvalidInput(t *testing.T) {
 	ffmpegPath := fakeFFmpeg(t)
 	// Values outside (0,1] should be reset to 0.90.
 	for _, conf := range []float64{0, -0.5, 1.5} {
-		d, err := NewHTTPDetector("http://classifier:8080", 30, conf, nil, ffmpegPath, 0)
+		d, err := NewHTTPDetector(Config{ClassifierURL: "http://classifier:8080", SampleDurationSeconds: 30, MinConfidence: conf, FFmpegPath: ffmpegPath})
 		if err != nil {
 			t.Fatalf("NewHTTPDetector(conf=%.1f): %v", conf, err)
 		}
@@ -436,7 +436,7 @@ func TestHTTPDetectorDefaultMinConfidenceOnInvalidInput(t *testing.T) {
 func TestHTTPDetectorDetectEmptyPathError(t *testing.T) {
 	ffmpegPath := fakeFFmpeg(t)
 
-	d, err := NewHTTPDetector("http://classifier:8080", 30, 0.90, nil, ffmpegPath, 0)
+	d, err := NewHTTPDetector(Config{ClassifierURL: "http://classifier:8080", SampleDurationSeconds: 30, MinConfidence: 0.90, FFmpegPath: ffmpegPath})
 	if err != nil {
 		t.Fatalf("NewHTTPDetector: %v", err)
 	}
@@ -450,7 +450,7 @@ func TestHTTPDetectorDetectEmptyPathError(t *testing.T) {
 func TestHTTPDetectorDefaultClasses(t *testing.T) {
 	ffmpegPath := fakeFFmpeg(t)
 	// Passing nil classes should use the built-in defaults.
-	d, err := NewHTTPDetector("http://classifier:8080", 30, 0.90, nil, ffmpegPath, 0)
+	d, err := NewHTTPDetector(Config{ClassifierURL: "http://classifier:8080", SampleDurationSeconds: 30, MinConfidence: 0.90, FFmpegPath: ffmpegPath})
 	if err != nil {
 		t.Fatalf("NewHTTPDetector: %v", err)
 	}
@@ -464,7 +464,7 @@ func TestHTTPDetectorDefaultClasses(t *testing.T) {
 func TestNewHTTPDetectorInvalidURL(t *testing.T) {
 	ffmpegPath := fakeFFmpeg(t)
 	// A URL that is not a valid request URI should be rejected.
-	_, err := NewHTTPDetector("not-a-url", 30, 0.90, nil, ffmpegPath, 0)
+	_, err := NewHTTPDetector(Config{ClassifierURL: "not-a-url", SampleDurationSeconds: 30, MinConfidence: 0.90, FFmpegPath: ffmpegPath})
 	if err == nil {
 		t.Fatal("NewHTTPDetector returned nil error for invalid URL; want error")
 	}
@@ -473,7 +473,7 @@ func TestNewHTTPDetectorInvalidURL(t *testing.T) {
 func TestNewHTTPDetectorRejectsSchemelesURL(t *testing.T) {
 	ffmpegPath := fakeFFmpeg(t)
 	for _, u := range []string{"/classify", "classifier:8080", "example.com"} {
-		_, err := NewHTTPDetector(u, 30, 0.90, nil, ffmpegPath, 0)
+		_, err := NewHTTPDetector(Config{ClassifierURL: u, SampleDurationSeconds: 30, MinConfidence: 0.90, FFmpegPath: ffmpegPath})
 		if err == nil {
 			t.Errorf("NewHTTPDetector(%q) returned nil error; want rejection of scheme-less URL", u)
 		}
@@ -531,5 +531,253 @@ func TestWrapWithPriority(t *testing.T) {
 				t.Errorf("args = %v; want %v", args, tc.wantArgs)
 			}
 		})
+	}
+}
+
+func TestClassifyParsesMeanMax(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "song.flac")
+	if err := os.WriteFile(audioPath, []byte("a"), 0600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"mean": map[string]float64{"Music": 0.9, "Singing": 0.01},
+			"max":  map[string]float64{"Music": 1.0, "Singing": 0.30},
+		})
+	}))
+	defer srv.Close()
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, FFmpegPath: fakeFFmpeg(t)})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	resp, err := d.classify(context.Background(), audioPath)
+	if err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if resp.Mean["Music"] != 0.9 || resp.Max["Singing"] != 0.30 {
+		t.Fatalf("got mean=%v max=%v", resp.Mean, resp.Max)
+	}
+}
+
+func TestClassifyLegacyFlatMapTreatedAsMeanOnly(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "song.flac")
+	if err := os.WriteFile(audioPath, []byte("a"), 0600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]float64{"Music": 0.95}) // old flat shape
+	}))
+	defer srv.Close()
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, FFmpegPath: fakeFFmpeg(t)})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	resp, err := d.classify(context.Background(), audioPath)
+	if err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if resp.Mean["Music"] != 0.95 || len(resp.Max) != 0 {
+		t.Fatalf("legacy: mean=%v max=%v (max must be empty)", resp.Mean, resp.Max)
+	}
+}
+
+func TestBuildSpreadSelectExpr(t *testing.T) {
+	// 180s track, 6 samples of 5s: centers at 15,45,75,105,135,165; start=center-2.5.
+	got := buildSpreadSelectExpr(180, 6, 5)
+	want := "between(t,12.50,17.50)+between(t,42.50,47.50)+between(t,72.50,77.50)+" +
+		"between(t,102.50,107.50)+between(t,132.50,137.50)+between(t,162.50,167.50)"
+	if got != want {
+		t.Fatalf("expr=%q\nwant=%q", got, want)
+	}
+}
+
+func TestBuildSpreadSelectExprClampsAndDegrades(t *testing.T) {
+	if got := buildSpreadSelectExpr(0, 6, 5); got != "" {
+		t.Fatalf("unknown duration must yield empty expr, got %q", got)
+	}
+	if got := buildSpreadSelectExpr(4, 6, 5); got != "between(t,0.00,4.00)" {
+		t.Fatalf("sub-segment track must select whole clip, got %q", got)
+	}
+	if got := buildSpreadSelectExpr(180, 1, 5); got == "" {
+		t.Fatalf("single sample must still produce one window")
+	}
+}
+
+// fakeFFprobe writes a helper that prints a fixed duration to stdout, mimicking
+// `ffprobe -show_entries format=duration -of csv=p=0`.
+func fakeFFprobe(t *testing.T, seconds string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ffprobe")
+	script := "#!/bin/sh\nprintf '" + seconds + "\\n'\n"
+	if err := os.WriteFile(path, []byte(script), 0700); err != nil {
+		t.Fatalf("write fake ffprobe: %v", err)
+	}
+	return path
+}
+
+func TestProbeDurationSeconds(t *testing.T) {
+	d, err := NewHTTPDetector(Config{ClassifierURL: "http://c:8080", FFmpegPath: fakeFFmpeg(t), FFprobePath: fakeFFprobe(t, "212.5")})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	dur, err := d.probeDurationSeconds(context.Background(), "any.flac")
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if dur != 212.5 {
+		t.Fatalf("duration = %v; want 212.5", dur)
+	}
+}
+
+func TestDetectVocalPeakBlocksInstrumental(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "song.flac")
+	if err := os.WriteFile(audioPath, []byte("a"), 0600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"mean": map[string]float64{"Music": 0.8, "Musical instrument": 0.15, "Singing": 0.02},
+			"max":  map[string]float64{"Music": 1.0, "Singing": 0.30}, // peak singing -> vocal
+		})
+	}))
+	defer srv.Close()
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, FFmpegPath: fakeFFmpeg(t),
+		InstrumentalClasses: []string{"Music", "Musical instrument"},
+		VocalClasses:        []string{"Singing", "Vocal music"},
+		VocalMaxConfidence:  0.05})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	res, err := d.Detect(context.Background(), audioPath)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if res.Instrumental {
+		t.Fatalf("vocal peak %.2f >= threshold 0.05 must NOT be instrumental", res.VocalConfidence)
+	}
+}
+
+func TestDetectMusicHighNoVocalIsInstrumental(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "song.flac")
+	if err := os.WriteFile(audioPath, []byte("a"), 0600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"mean": map[string]float64{"Music": 0.93, "Musical instrument": 0.05, "Singing": 0.001},
+			"max":  map[string]float64{"Music": 1.0, "Singing": 0.01}, // below threshold
+		})
+	}))
+	defer srv.Close()
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, FFmpegPath: fakeFFmpeg(t),
+		InstrumentalClasses: []string{"Music", "Musical instrument"},
+		VocalClasses:        []string{"Singing", "Vocal music"},
+		VocalMaxConfidence:  0.05})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	res, err := d.Detect(context.Background(), audioPath)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if !res.Instrumental {
+		t.Fatalf("music_sum %.2f / vocal_peak %.3f must yield instrumental", res.Confidence, res.VocalConfidence)
+	}
+}
+
+func TestDetectMissingMaxMapIsNotInstrumental(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "song.flac")
+	if err := os.WriteFile(audioPath, []byte("a"), 0600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]float64{"Music": 0.99, "Musical instrument": 0.0}) // legacy, no max
+	}))
+	defer srv.Close()
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, FFmpegPath: fakeFFmpeg(t),
+		InstrumentalClasses: []string{"Music", "Musical instrument"},
+		VocalClasses:        []string{"Singing"}, VocalMaxConfidence: 0.05})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	res, err := d.Detect(context.Background(), audioPath)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if res.Instrumental {
+		t.Fatal("missing max map must degrade to NOT instrumental (safe)")
+	}
+}
+
+func TestFFmpegSpreadSampleArgs(t *testing.T) {
+	got := ffmpegSpreadSampleArgs("song.flac", "out.wav", "between(t,1.00,6.00)+between(t,7.00,12.00)")
+	// The select expr MUST be wrapped in literal single quotes: ffmpeg's filter
+	// parser consumes them as argument escaping (exec.Command uses no shell, so
+	// they are NOT shell quotes). Verified against live ffmpeg.
+	wantAF := "aselect='between(t,1.00,6.00)+between(t,7.00,12.00)',asetpts=N/SR/TB"
+	idx := slices.Index(got, "-af")
+	if idx < 0 || got[idx+1] != wantAF {
+		t.Fatalf("-af arg = %v; want %q", got, wantAF)
+	}
+	if got[len(got)-1] != "out.wav" {
+		t.Fatalf("last arg = %q; want out.wav", got[len(got)-1])
+	}
+}
+
+func TestDetectUsesSpreadSampleWhenDurationKnown(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "song.flac")
+	if err := os.WriteFile(audioPath, []byte("a"), 0600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"mean": map[string]float64{"Music": 0.95, "Musical instrument": 0.02},
+			"max":  map[string]float64{"Music": 1.0, "Singing": 0.005},
+		})
+	}))
+	defer srv.Close()
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, FFmpegPath: fakeFFmpeg(t), FFprobePath: fakeFFprobe(t, "180"),
+		InstrumentalClasses: []string{"Music", "Musical instrument"}, VocalClasses: []string{"Singing"},
+		VocalMaxConfidence: 0.05, SpreadSamples: 6})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	// A 180s track with SpreadSamples=6 must produce a non-empty spread expr;
+	// this asserts the spread branch (and ffmpegSpreadSampleArgs) is exercised.
+	if expr := d.spreadExpr(context.Background(), audioPath); expr == "" {
+		t.Fatal("spreadExpr empty with known duration and SpreadSamples=6; spread branch not exercised")
+	}
+	res, err := d.Detect(context.Background(), audioPath)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if !res.Instrumental {
+		t.Fatalf("music high, vocal low must be instrumental; got vocal_peak=%.3f", res.VocalConfidence)
+	}
+}
+
+func TestNewHTTPDetectorDefaultsVocalGate(t *testing.T) {
+	// A minimal Config must yield a working vocal gate (the constructor honors its
+	// documented defaulting), not a silently-disabled one.
+	d, err := NewHTTPDetector(Config{ClassifierURL: "http://c:8080", FFmpegPath: fakeFFmpeg(t)})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	if d.vocalMaxConfidence != 0.03 {
+		t.Errorf("vocalMaxConfidence = %v; want 0.03 (defaulted)", d.vocalMaxConfidence)
+	}
+	if d.spreadSamples != 0 {
+		t.Errorf("spreadSamples = %d; want 0 (not constructor-defaulted; 0/1 means single window)", d.spreadSamples)
+	}
+	if len(d.vocalClasses) == 0 || d.vocalClasses[0] != "Singing" {
+		t.Errorf("vocalClasses = %v; want defaulted list starting with Singing", d.vocalClasses)
+	}
+	// Out-of-range vocalMaxConfidence resets to the default, mirroring minConfidence.
+	d2, err := NewHTTPDetector(Config{ClassifierURL: "http://c:8080", FFmpegPath: fakeFFmpeg(t), VocalMaxConfidence: 1.5})
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	if d2.vocalMaxConfidence != 0.03 {
+		t.Errorf("vocalMaxConfidence = %v; want 0.03 (out-of-range reset)", d2.vocalMaxConfidence)
 	}
 }
