@@ -72,18 +72,22 @@ lower_pkgs=""   # space-separated list of packages to lower
 while [ $# -gt 0 ]; do
   case "$1" in
     --cover)
+      [ $# -ge 2 ] || { echo "coverage-floor: $1 requires a value" >&2; exit 2; }
       cover_arg="$2"
       shift 2
       ;;
     --floor)
+      [ $# -ge 2 ] || { echo "coverage-floor: $1 requires a value" >&2; exit 2; }
       floor_arg="$2"
       shift 2
       ;;
     --bump)
+      [ $# -ge 2 ] || { echo "coverage-floor: $1 requires a value" >&2; exit 2; }
       bump_pkgs="${bump_pkgs:+$bump_pkgs }$2"
       shift 2
       ;;
     --lower)
+      [ $# -ge 2 ] || { echo "coverage-floor: $1 requires a value" >&2; exit 2; }
       lower_pkgs="${lower_pkgs:+$lower_pkgs }$2"
       shift 2
       ;;
@@ -224,9 +228,9 @@ if [ -n "$bump_pkgs" ]; then
 
     # Read the existing floor for this package (0 if not yet present)
     existing=$(awk -v p="$pkg" '
-      $0 ~ "\"" p "\"" {
-        match($0, /[0-9]+/)
-        print substr($0, RSTART, RLENGTH)
+      index($0, "\"" p "\":") > 0 {
+        v = substr($0, index($0, ":") + 1)
+        if (match(v, /[0-9]+/)) print substr(v, RSTART, RLENGTH)
         exit
       }
     ' "$FLOOR_FILE")
@@ -245,11 +249,14 @@ if [ -n "$bump_pkgs" ]; then
         {
           # Pattern for existing entry: "internal/pkg": <number>
           entry = "\"" pkg "\":"
-          if (index($0, entry) > 0) {
-            # Replace the integer after the colon, preserving trailing comma if any
-            match($0, /[0-9]+/)
-            line = substr($0, 1, RSTART - 1) val substr($0, RSTART + RLENGTH)
-            print line
+          ei = index($0, entry)
+          if (ei > 0) {
+            # Replace the integer after the key, anchored past "key": so a digit
+            # inside a package name is never matched; trailing comma is preserved.
+            head = substr($0, 1, ei + length(entry) - 1)
+            tail = substr($0, ei + length(entry))
+            sub(/[0-9]+/, val, tail)
+            print head tail
             found = 1
             next
           }
@@ -306,9 +313,9 @@ if [ -n "$lower_pkgs" ]; then
     # Read the existing floor for this package; error if absent (cannot lower
     # a package that has no floor entry -- add one with --bump first).
     existing=$(awk -v p="$pkg" '
-      $0 ~ "\"" p "\"" {
-        match($0, /[0-9]+/)
-        print substr($0, RSTART, RLENGTH)
+      index($0, "\"" p "\":") > 0 {
+        v = substr($0, index($0, ":") + 1)
+        if (match(v, /[0-9]+/)) print substr(v, RSTART, RLENGTH)
         exit
       }
     ' "$FLOOR_FILE")
@@ -328,10 +335,13 @@ if [ -n "$lower_pkgs" ]; then
       updated=$(awk -v pkg="$pkg" -v val="$current" '
         {
           entry = "\"" pkg "\":"
-          if (index($0, entry) > 0) {
-            match($0, /[0-9]+/)
-            line = substr($0, 1, RSTART - 1) val substr($0, RSTART + RLENGTH)
-            print line
+          ei = index($0, entry)
+          if (ei > 0) {
+            # Anchored value replace (see --bump rewrite for rationale).
+            head = substr($0, 1, ei + length(entry) - 1)
+            tail = substr($0, ei + length(entry))
+            sub(/[0-9]+/, val, tail)
+            print head tail
             found = 1
             next
           }
