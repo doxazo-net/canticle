@@ -32,6 +32,8 @@ type HTTPDetector struct {
 	instrumentalClasses []string
 	vocalClasses        []string
 	vocalMaxConfidence  float64
+	speechClasses       []string
+	speechMaxConfidence float64
 	spreadSamples       int
 	ffmpegPath          string
 	ffprobePath         string // empty when ffprobe cannot be resolved (spread sampling falls back to one window)
@@ -55,8 +57,11 @@ type HTTPDetector struct {
 // at cfg.ClassifierURL. cfg.InstrumentalClasses lists the AudioSet class names
 // whose mean probabilities are summed and compared against cfg.MinConfidence
 // (range 0-1) for the music gate; cfg.VocalClasses + cfg.VocalMaxConfidence form
-// the vocal gate (see Detect). cfg.CooldownSeconds enforces a minimum gap between
-// inference calls. Zero/blank fields fall back to built-in defaults.
+// the sung-vocal PEAK gate and cfg.SpeechClasses + cfg.SpeechMaxConfidence form
+// the sustained-MEAN speech gate (see Detect). A class listed in both is
+// de-duplicated out of the vocal peak set so Speech is governed only by the mean
+// gate. cfg.CooldownSeconds enforces a minimum gap between inference calls.
+// Zero/blank fields fall back to built-in defaults.
 func NewHTTPDetector(cfg Config) (*HTTPDetector, error) {
 	classifierURL := strings.TrimSpace(cfg.ClassifierURL)
 	if classifierURL == "" {
@@ -125,6 +130,33 @@ func NewHTTPDetector(cfg Config) (*HTTPDetector, error) {
 	if vocalMaxConfidence <= 0 || vocalMaxConfidence > 1 {
 		vocalMaxConfidence = defaultVocalMaxConfidence
 	}
+	// Speech gate: gated on SUSTAINED summed frame MEAN (not peak), separate from
+	// the sung-vocal peak gate, so brief incidental speech does not block an
+	// instrumental marking. Default and range-reset mirror the vocal-gate handling.
+	speechClasses := cfg.SpeechClasses
+	if len(speechClasses) == 0 {
+		speechClasses = slices.Clone(defaultSpeechClasses)
+	}
+	speechMaxConfidence := cfg.SpeechMaxConfidence
+	if speechMaxConfidence <= 0 || speechMaxConfidence > 1 {
+		speechMaxConfidence = defaultSpeechMaxConfidence
+	}
+	// De-dup: a class governed by the mean-based speech gate must NOT also sit in
+	// the strict peak set, or a legacy config that still lists "Speech" in
+	// vocal_classes (the old default) would double-gate it and the strict peak
+	// gate would silently undermine the new sustained-presence gate. Remove every
+	// speech class from the effective vocalClasses so Speech is governed solely by
+	// the mean gate; this delivers the false-negative fix to legacy configs without
+	// requiring users to edit their files.
+	if len(speechClasses) > 0 {
+		filtered := vocalClasses[:0:0]
+		for _, c := range vocalClasses {
+			if !slices.Contains(speechClasses, c) {
+				filtered = append(filtered, c)
+			}
+		}
+		vocalClasses = filtered
+	}
 	spreadSamples := cfg.SpreadSamples
 	// ionice is Linux-specific (I/O scheduler class control). nice is POSIX but
 	// not guaranteed to be installed (e.g. a stripped container, or Windows).
@@ -139,6 +171,8 @@ func NewHTTPDetector(cfg Config) (*HTTPDetector, error) {
 		instrumentalClasses: classes,
 		vocalClasses:        vocalClasses,
 		vocalMaxConfidence:  vocalMaxConfidence,
+		speechClasses:       speechClasses,
+		speechMaxConfidence: speechMaxConfidence,
 		spreadSamples:       spreadSamples,
 		ffmpegPath:          resolvedFFmpegPath,
 		ffprobePath:         ffprobePath,
@@ -205,6 +239,15 @@ func (d *HTTPDetector) Detect(ctx context.Context, audioPath string) (Result, er
 			vocalPeak = v
 		}
 	}
+	// Speech gate: summed frame MEAN of the speech classes (sustained presence),
+	// mirroring the music gate's summed-mean aggregation (NOT a peak). A brief
+	// incidental sample has near-zero mean; a spoken-word track has a high mean.
+	// Mean is always present (even for a legacy flat-map sidecar), so this gate
+	// does NOT affect the maxAvailable safe-degradation path below.
+	var speechMean float64
+	for _, name := range d.speechClasses {
+		speechMean += resp.Mean[name]
+	}
 	maxAvailable := len(resp.Max) > 0
 	if !maxAvailable {
 		// Severity split (deliberate): a fully-absent max map is the documented,
@@ -229,21 +272,23 @@ func (d *HTTPDetector) Detect(ctx context.Context, audioPath string) (Result, er
 				"path", audioPath, "missing_classes", missing)
 		}
 	}
-	instrumental := music >= d.minConfidence && maxAvailable && baselineComplete && vocalPeak < d.vocalMaxConfidence
+	instrumental := music >= d.minConfidence && maxAvailable && baselineComplete &&
+		vocalPeak < d.vocalMaxConfidence && speechMean < d.speechMaxConfidence
 
 	// Surface the decision inputs: the worker only reads res.Instrumental, so
 	// without this line a misclassification leaves no trace of the music_sum /
-	// vocal_peak that produced it.
+	// vocal_peak / speech_mean that produced it.
 	slog.Info("detector: instrumental decision",
-		"path", audioPath, "music_sum", music, "vocal_peak", vocalPeak,
+		"path", audioPath, "music_sum", music, "vocal_peak", vocalPeak, "speech_mean", speechMean,
 		"instrumental", instrumental, "min_confidence", d.minConfidence,
-		"vocal_max_confidence", d.vocalMaxConfidence)
+		"vocal_max_confidence", d.vocalMaxConfidence, "speech_max_confidence", d.speechMaxConfidence)
 
 	return Result{
-		Instrumental:    instrumental,
-		Confidence:      music,
-		VocalConfidence: vocalPeak,
-		Classes:         resp.Mean,
+		Instrumental:     instrumental,
+		Confidence:       music,
+		VocalConfidence:  vocalPeak,
+		SpeechConfidence: speechMean,
+		Classes:          resp.Mean,
 	}, nil
 }
 
@@ -258,6 +303,16 @@ func (d *HTTPDetector) warnUnknownClassesOnce(resp classifyResponse) {
 		for _, c := range d.instrumentalClasses {
 			if _, ok := resp.Mean[c]; !ok {
 				slog.Error("detector: configured instrumental class not in classifier response", "class", c)
+			}
+		}
+		// Speech classes are aggregated from the MEAN map (the speech gate sums
+		// resp.Mean), so validate them against resp.Mean -- mirroring the
+		// unconditional instrumental-class check, not the resp.Max-guarded vocal
+		// check. A missing/typo'd speech class silently contributes 0 to the sum
+		// and would quietly disable the speech gate, so surface it loudly.
+		for _, c := range d.speechClasses {
+			if _, ok := resp.Mean[c]; !ok {
+				slog.Error("detector: configured speech class not in classifier response; speech gate silently disabled for it", "class", c)
 			}
 		}
 	})
