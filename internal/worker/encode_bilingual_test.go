@@ -3,7 +3,7 @@ package worker
 import (
 	"testing"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
+	"github.com/doxazo-net/canticle/internal/models"
 )
 
 // TestEncodeDecodeSong_TranslationRoundTrip verifies a Song carrying a non-empty

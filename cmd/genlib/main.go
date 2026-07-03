@@ -12,7 +12,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/testutil"
+	"github.com/doxazo-net/canticle/internal/testutil"
 )
 
 func main() {

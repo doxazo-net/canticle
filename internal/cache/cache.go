@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/normalize"
+	"github.com/doxazo-net/canticle/internal/normalize"
 )
 
 // CacheRepo provides read/write access to the lyrics_cache table.

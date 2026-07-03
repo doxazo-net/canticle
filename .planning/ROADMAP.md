@@ -24,7 +24,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Depends on**: Nothing (first phase)
 **Requirements**: MOD-01, MOD-02, LAYOUT-02, LAYOUT-03, LAYOUT-04, LAYOUT-05, LAYOUT-06, API-01, API-04, API-05
 **Success Criteria** (what must be TRUE):
-  1. `go.mod` shows module path `github.com/sydlexius/mxlrcgo-svc` and `go build ./...` succeeds
+  1. `go.mod` shows module path `github.com/doxazo-net/canticle` and `go build ./...` succeeds
   2. Five internal packages exist (`models`, `musixmatch`, `lyrics`, `scanner`, `app`) with exported types and constructor functions
   3. `Fetcher` interface is defined in `internal/musixmatch` and `Client` implements it
   4. No `log.Fatal` calls exist in any `internal/` package -- all functions return errors

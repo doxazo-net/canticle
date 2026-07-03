@@ -12,9 +12,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/config"
-	"github.com/sydlexius/mxlrcgo-svc/internal/providers"
-	"github.com/sydlexius/mxlrcgo-svc/internal/secrets"
+	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/doxazo-net/canticle/internal/providers"
+	"github.com/doxazo-net/canticle/internal/secrets"
 )
 
 // handleSaveField is the single-field settings write endpoint (#288 Phase 2).

@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 
-	dbpkg "github.com/sydlexius/mxlrcgo-svc/internal/db"
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
-	"github.com/sydlexius/mxlrcgo-svc/internal/normalize"
+	dbpkg "github.com/doxazo-net/canticle/internal/db"
+	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/doxazo-net/canticle/internal/normalize"
 )
 
 const (

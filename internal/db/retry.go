@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/backoff"
+	"github.com/doxazo-net/canticle/internal/backoff"
 )
 
 // Short backoff bounds for SQLITE_BUSY retries. busy_timeout already waits up to

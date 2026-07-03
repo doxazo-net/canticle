@@ -39,9 +39,9 @@ builds:
       # defaults). GoReleaser only auto-injects these when ldflags is unset, so
       # they are wired explicitly here. CommitDate (not Date) keeps the build
       # reproducible, matching the -trimpath stance above.
-      - -X github.com/sydlexius/mxlrcgo-svc/internal/version.Version={{ .Version }}
-      - -X github.com/sydlexius/mxlrcgo-svc/internal/version.Commit={{ .Commit }}
-      - -X github.com/sydlexius/mxlrcgo-svc/internal/version.Date={{ .CommitDate }}
+      - -X github.com/doxazo-net/canticle/internal/version.Version={{ .Version }}
+      - -X github.com/doxazo-net/canticle/internal/version.Commit={{ .Commit }}
+      - -X github.com/doxazo-net/canticle/internal/version.Date={{ .CommitDate }}
 
 archives:
   - id: default
@@ -60,8 +60,8 @@ homebrew_casks:
     # Renamed from the pre-rebrand "mxlrcgo-svc" cask (issue #388). Unlike the
     # nfpm packages, a cask cannot self-replace the old token; conflicts_with
     # just prevents both being installed at once. Auto-migration of an existing
-    # `brew install sydlexius/tap/mxlrcgo-svc` needs a cask_renames entry in the
-    # sydlexius/homebrew-tap repo (tracked separately) plus removal of the stale
+    # `brew install doxazo-net/tap/mxlrcgo-svc` needs a cask_renames entry in the
+    # doxazo-net/homebrew-tap repo (tracked separately) plus removal of the stale
     # Casks/mxlrcgo-svc.rb there.
     conflicts:
       - cask: mxlrcgo-svc
@@ -70,12 +70,12 @@ homebrew_casks:
     binaries:
       - canticle
     repository:
-      owner: sydlexius
+      owner: doxazo-net
       name: homebrew-tap
       branch: main
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     directory: Casks
-    homepage: https://sydlexius.github.io/canticle/
+    homepage: https://doxazo-net.github.io/canticle/
     description: Fetch synced lyrics from Musixmatch and save them as .lrc files
     caveats: |
       Set your Musixmatch token via MUSIXMATCH_TOKEN or in the config file:
@@ -113,8 +113,8 @@ nfpms:
       - mxlrcgo-svc
     provides:
       - mxlrcgo-svc
-    vendor: sydlexius
-    homepage: https://sydlexius.github.io/canticle/
+    vendor: doxazo-net
+    homepage: https://doxazo-net.github.io/canticle/
     maintainer: sydlexius <maintainer@placeholder.example>
     description: Fetch synced lyrics from Musixmatch and save them as .lrc files
     license: GPL-3.0
@@ -168,7 +168,7 @@ nfpms:
 dockers_v2:
   - id: canticle
     images:
-      - "ghcr.io/sydlexius/canticle"
+      - "ghcr.io/doxazo-net/canticle"
     # dockers_v2 ignores empty tag templates, so prerelease gating is encoded
     # by emitting "" for the disallowed branch:
     #   :VERSION       always
@@ -244,7 +244,7 @@ changelog:
 
 release:
   github:
-    owner: sydlexius
+    owner: doxazo-net
     name: canticle
   prerelease: auto
   make_latest: '{{ if .Prerelease }}false{{ else }}true{{ end }}'
@@ -253,10 +253,10 @@ release:
 
     {{ if .Prerelease }}> This is a pre-release version. Use the `beta` Docker tag to try it out.{{ end }}
   footer: |
-    **Docker:** `docker pull ghcr.io/sydlexius/canticle:{{ .Version }}`
+    **Docker:** `docker pull ghcr.io/doxazo-net/canticle:{{ .Version }}`
 
     {{- if .PreviousTag }}
-    **Full Changelog:** [{{ .PreviousTag }}...{{ .Tag }}](https://github.com/sydlexius/canticle/compare/{{ .PreviousTag }}...{{ .Tag }})
+    **Full Changelog:** [{{ .PreviousTag }}...{{ .Tag }}](https://github.com/doxazo-net/canticle/compare/{{ .PreviousTag }}...{{ .Tag }})
     {{- else }}
-    **Full Changelog:** [{{ .Tag }}](https://github.com/sydlexius/canticle/releases/tag/{{ .Tag }})
+    **Full Changelog:** [{{ .Tag }}](https://github.com/doxazo-net/canticle/releases/tag/{{ .Tag }})
     {{- end }}

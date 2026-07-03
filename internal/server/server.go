@@ -13,17 +13,17 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/auth"
-	"github.com/sydlexius/mxlrcgo-svc/internal/config"
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
-	"github.com/sydlexius/mxlrcgo-svc/internal/normalize"
-	"github.com/sydlexius/mxlrcgo-svc/internal/pathutil"
-	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
-	"github.com/sydlexius/mxlrcgo-svc/internal/reports"
-	"github.com/sydlexius/mxlrcgo-svc/internal/scan"
-	"github.com/sydlexius/mxlrcgo-svc/internal/secrets"
-	"github.com/sydlexius/mxlrcgo-svc/internal/trustnet"
-	"github.com/sydlexius/mxlrcgo-svc/internal/web"
+	"github.com/doxazo-net/canticle/internal/auth"
+	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/doxazo-net/canticle/internal/normalize"
+	"github.com/doxazo-net/canticle/internal/pathutil"
+	"github.com/doxazo-net/canticle/internal/queue"
+	"github.com/doxazo-net/canticle/internal/reports"
+	"github.com/doxazo-net/canticle/internal/scan"
+	"github.com/doxazo-net/canticle/internal/secrets"
+	"github.com/doxazo-net/canticle/internal/trustnet"
+	"github.com/doxazo-net/canticle/internal/web"
 )
 
 const maxWebhookBody = 1 << 20 // 1 MiB

@@ -11,14 +11,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/backoff"
-	"github.com/sydlexius/mxlrcgo-svc/internal/circuit"
-	"github.com/sydlexius/mxlrcgo-svc/internal/detector"
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
-	"github.com/sydlexius/mxlrcgo-svc/internal/musixmatch"
-	"github.com/sydlexius/mxlrcgo-svc/internal/orchestrator"
-	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
-	"github.com/sydlexius/mxlrcgo-svc/internal/verification"
+	"github.com/doxazo-net/canticle/internal/backoff"
+	"github.com/doxazo-net/canticle/internal/circuit"
+	"github.com/doxazo-net/canticle/internal/detector"
+	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/doxazo-net/canticle/internal/musixmatch"
+	"github.com/doxazo-net/canticle/internal/orchestrator"
+	"github.com/doxazo-net/canticle/internal/queue"
+	"github.com/doxazo-net/canticle/internal/verification"
 )
 
 // logRecord captures one emitted log line's level, message, and attrs for

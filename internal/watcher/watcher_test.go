@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
+	"github.com/doxazo-net/canticle/internal/models"
 )
 
 // waitFor polls cond until it returns true or a generous deadline elapses,

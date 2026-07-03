@@ -7,12 +7,12 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/doxazo-net/canticle/internal/app"
+	"github.com/doxazo-net/canticle/internal/commands"
+	"github.com/doxazo-net/canticle/internal/lyrics"
+	"github.com/doxazo-net/canticle/internal/musixmatch"
+	"github.com/doxazo-net/canticle/internal/queue"
 	"github.com/joho/godotenv"
-	"github.com/sydlexius/mxlrcgo-svc/internal/app"
-	"github.com/sydlexius/mxlrcgo-svc/internal/commands"
-	"github.com/sydlexius/mxlrcgo-svc/internal/lyrics"
-	"github.com/sydlexius/mxlrcgo-svc/internal/musixmatch"
-	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
 )
 
 type appRunner = commands.AppRunner

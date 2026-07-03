@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/reports"
-	"github.com/sydlexius/mxlrcgo-svc/web/templates"
+	"github.com/doxazo-net/canticle/internal/reports"
+	"github.com/doxazo-net/canticle/web/templates"
 )
 
 // dashboardRecentLimit caps the Recent outcomes section on the dashboard.

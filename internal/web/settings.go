@@ -9,10 +9,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/auth"
-	"github.com/sydlexius/mxlrcgo-svc/internal/config"
-	"github.com/sydlexius/mxlrcgo-svc/internal/providers"
-	"github.com/sydlexius/mxlrcgo-svc/web/templates"
+	"github.com/doxazo-net/canticle/internal/auth"
+	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/doxazo-net/canticle/internal/providers"
+	"github.com/doxazo-net/canticle/web/templates"
 )
 
 // handleSettings renders the editable-settings page read path (#288 Phase 1). It

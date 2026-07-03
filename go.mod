@@ -1,4 +1,4 @@
-module github.com/sydlexius/mxlrcgo-svc
+module github.com/doxazo-net/canticle
 
 go 1.26.4
 

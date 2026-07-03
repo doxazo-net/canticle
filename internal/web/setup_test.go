@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/config"
-	"github.com/sydlexius/mxlrcgo-svc/internal/db"
-	"github.com/sydlexius/mxlrcgo-svc/internal/secrets"
-	"github.com/sydlexius/mxlrcgo-svc/internal/trustnet"
-	"github.com/sydlexius/mxlrcgo-svc/internal/webauth"
+	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/doxazo-net/canticle/internal/db"
+	"github.com/doxazo-net/canticle/internal/secrets"
+	"github.com/doxazo-net/canticle/internal/trustnet"
+	"github.com/doxazo-net/canticle/internal/webauth"
 )
 
 const loopbackPeer = "127.0.0.1:5500"
@@ -122,7 +122,7 @@ func TestSetupRendersTokenHelpLink(t *testing.T) {
 	}
 	body := rec.Body.String()
 	for _, want := range []string{
-		"https://sydlexius.github.io/canticle/GETTING_STARTED/#get-a-musixmatch-token",
+		"https://doxazo-net.github.io/canticle/GETTING_STARTED/#get-a-musixmatch-token",
 		`target="_blank"`,
 		`rel="noopener noreferrer"`,
 		"How do I get a token?",

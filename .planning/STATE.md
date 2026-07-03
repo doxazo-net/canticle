@@ -71,7 +71,7 @@ Recent decisions affecting current work:
 - [Roadmap]: Module rename happens first (zero-risk, no self-imports exist yet)
 - [Roadmap]: Models is the leaf package, must be created before domain packages
 - [Roadmap]: godotenv added with token work (Phase 3), not as separate dependency upgrade phase
-- [Phase 01]: Module renamed from github.com/fashni/mxlrc-go to github.com/sydlexius/mxlrcgo-svc
+- [Phase 01]: Module renamed from github.com/fashni/mxlrc-go to github.com/doxazo-net/canticle
 - [Phase 01]: Fetcher/Writer interfaces in implementing packages, all internal/ uses slog and error returns
 - [Phase 01]: main.go rewired as thin orchestrator, old flat files deleted, all tests pass
 - [Phase 02]: App struct owns all state with Run(ctx) method, handleFailed returns error, timer uses ticker+select for cancellation

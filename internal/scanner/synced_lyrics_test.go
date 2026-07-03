@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/testutil"
+	"github.com/doxazo-net/canticle/internal/testutil"
 )
 
 const syncedLRC = "[00:01.00]hello\n[00:02.00]world"

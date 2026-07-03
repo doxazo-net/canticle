@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	static "github.com/sydlexius/mxlrcgo-svc/web/static"
+	static "github.com/doxazo-net/canticle/web/static"
 )
 
 // staticPrefix is the URL prefix under which embedded assets are served.

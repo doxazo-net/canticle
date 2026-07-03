@@ -3,7 +3,7 @@ package petitlyrics
 import (
 	"context"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
+	"github.com/doxazo-net/canticle/internal/models"
 )
 
 // Fetcher abstracts lyrics lookup from petitlyrics.com. It mirrors the shared

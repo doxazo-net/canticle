@@ -3,7 +3,7 @@ package orchestrator
 import (
 	"errors"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/musixmatch"
+	"github.com/doxazo-net/canticle/internal/musixmatch"
 )
 
 // ErrLaneUnavailable is the sentinel a lane returns when its breaker is open and

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/normalize"
+	"github.com/doxazo-net/canticle/internal/normalize"
 )
 
 func FuzzNormalizeKey(f *testing.F) {

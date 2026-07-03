@@ -3,7 +3,7 @@ package normalize_test
 import (
 	"testing"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/normalize"
+	"github.com/doxazo-net/canticle/internal/normalize"
 )
 
 func TestNormalizeKey(t *testing.T) {

@@ -9,9 +9,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/config"
-	"github.com/sydlexius/mxlrcgo-svc/internal/db"
-	"github.com/sydlexius/mxlrcgo-svc/internal/secrets"
+	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/doxazo-net/canticle/internal/db"
+	"github.com/doxazo-net/canticle/internal/secrets"
 )
 
 // validSecretNames lists the secret names accepted by `secrets set`. v1 wires

@@ -6,10 +6,10 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/config"
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
-	"github.com/sydlexius/mxlrcgo-svc/internal/pathutil"
-	"github.com/sydlexius/mxlrcgo-svc/internal/scanner"
+	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/doxazo-net/canticle/internal/pathutil"
+	"github.com/doxazo-net/canticle/internal/scanner"
 )
 
 // LibraryLister lists configured library roots.

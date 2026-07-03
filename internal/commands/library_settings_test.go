@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/db"
-	"github.com/sydlexius/mxlrcgo-svc/internal/library"
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
+	"github.com/doxazo-net/canticle/internal/db"
+	"github.com/doxazo-net/canticle/internal/library"
+	"github.com/doxazo-net/canticle/internal/models"
 )
 
 func getLibraryForTest(t *testing.T, ctx context.Context, dbPath string, id int64) models.Library {
