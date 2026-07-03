@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
-	"github.com/sydlexius/mxlrcgo-svc/internal/scan"
-	"github.com/sydlexius/mxlrcgo-svc/internal/scanner"
+	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/doxazo-net/canticle/internal/scan"
+	"github.com/doxazo-net/canticle/internal/scanner"
 )
 
 type fakeLibraries struct {

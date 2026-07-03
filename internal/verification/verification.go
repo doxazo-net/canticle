@@ -16,9 +16,9 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/config"
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
-	"github.com/sydlexius/mxlrcgo-svc/internal/normalize"
+	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/doxazo-net/canticle/internal/normalize"
 )
 
 // Result describes an STT verification decision.

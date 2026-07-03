@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/config"
-	"github.com/sydlexius/mxlrcgo-svc/internal/reports"
+	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/doxazo-net/canticle/internal/reports"
 )
 
 // TestHandleDashboard_NoReports verifies that GET /dashboard returns 503 when

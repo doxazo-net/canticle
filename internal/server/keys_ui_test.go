@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/auth"
-	"github.com/sydlexius/mxlrcgo-svc/internal/config"
+	"github.com/doxazo-net/canticle/internal/auth"
+	"github.com/doxazo-net/canticle/internal/config"
 )
 
 // TestWithKeyManagerUIWiring verifies the server-level wiring: WithWebUI +

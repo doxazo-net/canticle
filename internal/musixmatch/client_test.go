@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
+	"github.com/doxazo-net/canticle/internal/models"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

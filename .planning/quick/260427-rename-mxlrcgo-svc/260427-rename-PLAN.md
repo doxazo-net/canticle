@@ -6,7 +6,7 @@ Break project identity away from the upstream fork name and rename local code/do
 
 ## Tasks
 
-- Update module path and all internal imports to `github.com/sydlexius/mxlrcgo-svc`.
+- Update module path and all internal imports to `github.com/doxazo-net/canticle`.
 - Rename the CLI entrypoint directory and binary references to `mxlrcgo-svc`.
 - Update docs, examples, smoke script, config defaults, and tests.
 - Check GitHub fork/remote state and document what can be detached automatically.

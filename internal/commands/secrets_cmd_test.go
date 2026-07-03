@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/config"
-	"github.com/sydlexius/mxlrcgo-svc/internal/secrets"
+	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/doxazo-net/canticle/internal/secrets"
 )
 
 // stdinFile writes content to a temp file and returns it opened for reading, so

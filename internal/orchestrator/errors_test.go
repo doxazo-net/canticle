@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/musixmatch"
+	"github.com/doxazo-net/canticle/internal/musixmatch"
 )
 
 func TestClassifyOutcome(t *testing.T) {

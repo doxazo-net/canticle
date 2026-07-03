@@ -12,8 +12,8 @@ import (
 
 	"github.com/rjeczalik/notify"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
-	"github.com/sydlexius/mxlrcgo-svc/internal/pathutil"
+	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/doxazo-net/canticle/internal/pathutil"
 )
 
 // LibraryLister lists configured library roots.

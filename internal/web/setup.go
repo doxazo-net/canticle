@@ -9,10 +9,10 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/secrets"
-	"github.com/sydlexius/mxlrcgo-svc/internal/trustnet"
-	"github.com/sydlexius/mxlrcgo-svc/internal/webauth"
-	"github.com/sydlexius/mxlrcgo-svc/web/templates"
+	"github.com/doxazo-net/canticle/internal/secrets"
+	"github.com/doxazo-net/canticle/internal/trustnet"
+	"github.com/doxazo-net/canticle/internal/webauth"
+	"github.com/doxazo-net/canticle/web/templates"
 )
 
 // passwordTooShortMsg is the single user-facing copy for a too-short password,

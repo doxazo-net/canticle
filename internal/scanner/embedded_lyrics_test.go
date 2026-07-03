@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/testutil"
+	"github.com/doxazo-net/canticle/internal/testutil"
 )
 
 func TestScanLibrary_EmbeddedLyricsRespect(t *testing.T) {

@@ -7,11 +7,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/config"
-	"github.com/sydlexius/mxlrcgo-svc/internal/db"
-	"github.com/sydlexius/mxlrcgo-svc/internal/trustnet"
-	"github.com/sydlexius/mxlrcgo-svc/internal/web"
-	"github.com/sydlexius/mxlrcgo-svc/internal/webauth"
+	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/doxazo-net/canticle/internal/db"
+	"github.com/doxazo-net/canticle/internal/trustnet"
+	"github.com/doxazo-net/canticle/internal/web"
+	"github.com/doxazo-net/canticle/internal/webauth"
 )
 
 // TestWithOnboardingWiring verifies the server-level wiring: WithWebUIAuth +

@@ -6,10 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/config"
-	"github.com/sydlexius/mxlrcgo-svc/internal/db"
-	"github.com/sydlexius/mxlrcgo-svc/internal/library"
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
+	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/doxazo-net/canticle/internal/db"
+	"github.com/doxazo-net/canticle/internal/library"
+	"github.com/doxazo-net/canticle/internal/models"
 )
 
 func TestRunComplete_TopLevelPrefix(t *testing.T) {

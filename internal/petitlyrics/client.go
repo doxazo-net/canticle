@@ -27,7 +27,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
+	"github.com/doxazo-net/canticle/internal/models"
 )
 
 // defaultBaseURL is the real petitlyrics.com host. Tests override baseURL to

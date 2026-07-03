@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
+	"github.com/doxazo-net/canticle/internal/models"
 )
 
 func syncedSong() models.Song {

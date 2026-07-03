@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
-	"github.com/sydlexius/mxlrcgo-svc/internal/pathutil"
-	"github.com/sydlexius/mxlrcgo-svc/internal/version"
+	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/doxazo-net/canticle/internal/pathutil"
+	"github.com/doxazo-net/canticle/internal/version"
 )
 
 // InstrumentalMarker is the human-readable marker embedded in an instrumental .txt

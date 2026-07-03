@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/config"
+	"github.com/doxazo-net/canticle/internal/config"
 )
 
 // secretCfg returns a config carrying both secret-bearing fields populated, so

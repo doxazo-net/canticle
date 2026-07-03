@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/doxazo-net/canticle/internal/normalize"
 	"github.com/pressly/goose/v3"
-	"github.com/sydlexius/mxlrcgo-svc/internal/normalize"
 )
 
 // TestOpen_CreatesDatabaseAndAppliesMigrations verifies that Open succeeds,

@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/library"
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
-	"github.com/sydlexius/mxlrcgo-svc/internal/scan"
+	"github.com/doxazo-net/canticle/internal/library"
+	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/doxazo-net/canticle/internal/scan"
 )
 
 func TestRepo_UpsertRoundTripsAlbumMetadata(t *testing.T) {

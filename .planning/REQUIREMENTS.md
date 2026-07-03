@@ -9,7 +9,7 @@ Requirements for M0. Each maps to roadmap phases.
 
 ### Module Identity
 
-- [x] **MOD-01**: Go module path renamed to `github.com/sydlexius/mxlrcgo-svc` in go.mod
+- [x] **MOD-01**: Go module path renamed to `github.com/doxazo-net/canticle` in go.mod
 - [x] **MOD-02**: All import paths updated to reflect new module path
 
 ### Project Layout

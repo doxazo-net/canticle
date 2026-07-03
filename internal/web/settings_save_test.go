@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/config"
-	"github.com/sydlexius/mxlrcgo-svc/internal/secrets"
+	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/doxazo-net/canticle/internal/secrets"
 )
 
 // fakeSecretStore is an in-memory secrets.Store for the write-path tests: it

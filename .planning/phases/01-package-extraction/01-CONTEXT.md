@@ -6,7 +6,7 @@
 <domain>
 ## Phase Boundary
 
-Rename the Go module from `github.com/fashni/mxlrc-go` to `github.com/sydlexius/mxlrcgo-svc`, create five internal packages (`models`, `musixmatch`, `lyrics`, `scanner`, `app`), export types, introduce interfaces, convert error handling from `log.Fatal`/`bool` returns to proper error returns, and clean up legacy naming. The entry point (`cmd/`) and token externalization are Phase 3. Global state elimination is Phase 2.
+Rename the Go module from `github.com/fashni/mxlrc-go` to `github.com/doxazo-net/canticle`, create five internal packages (`models`, `musixmatch`, `lyrics`, `scanner`, `app`), export types, introduce interfaces, convert error handling from `log.Fatal`/`bool` returns to proper error returns, and clean up legacy naming. The entry point (`cmd/`) and token externalization are Phase 3. Global state elimination is Phase 2.
 
 </domain>
 
@@ -77,7 +77,7 @@ No external specs -- requirements fully captured in decisions above and in the f
 
 ### Integration Points
 - `main.go` currently imports nothing (flat `package main`). After extraction, `main.go` imports all five internal packages
-- `go.mod` module path changes from `github.com/fashni/mxlrc-go` to `github.com/sydlexius/mxlrcgo-svc`
+- `go.mod` module path changes from `github.com/fashni/mxlrc-go` to `github.com/doxazo-net/canticle`
 - No existing self-imports to update (confirmed: no cross-file package imports exist today)
 
 </code_context>

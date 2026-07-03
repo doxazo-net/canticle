@@ -231,9 +231,9 @@ import (
     "os"
 
     "github.com/alexflint/go-arg"
-    "github.com/sydlexius/mxlrcgo-svc/internal/app"
-    "github.com/sydlexius/mxlrcgo-svc/internal/models"
-    "github.com/sydlexius/mxlrcgo-svc/internal/musixmatch"
+    "github.com/doxazo-net/canticle/internal/app"
+    "github.com/doxazo-net/canticle/internal/models"
+    "github.com/doxazo-net/canticle/internal/musixmatch"
 )
 
 func main() {

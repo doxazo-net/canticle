@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/lyrics"
-	"github.com/sydlexius/mxlrcgo-svc/internal/musixmatch"
+	"github.com/doxazo-net/canticle/internal/lyrics"
+	"github.com/doxazo-net/canticle/internal/musixmatch"
 )
 
 // freePort returns a currently-free TCP address on loopback. There is a small

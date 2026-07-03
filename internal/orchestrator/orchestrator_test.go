@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/circuit"
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
-	"github.com/sydlexius/mxlrcgo-svc/internal/musixmatch"
-	"github.com/sydlexius/mxlrcgo-svc/internal/providers"
+	"github.com/doxazo-net/canticle/internal/circuit"
+	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/doxazo-net/canticle/internal/musixmatch"
+	"github.com/doxazo-net/canticle/internal/providers"
 )
 
 func laneFor(p *stubProvider) *Lane {

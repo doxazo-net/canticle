@@ -1,6 +1,6 @@
 ## Project
 
-**Canticle (sydlexius/canticle)**
+**Canticle (doxazo-net/canticle)**
 
 A Go CLI tool that fetches synced lyrics from the Musixmatch API (and fallback providers) and saves them as `.lrc` files. The project is maintained under its own module path with global state eliminated and the API token externalized. Beyond the original one-shot `fetch` mode it now ships stateful, long-running features: a `serve` mode (HTTP server + durable SQLite work queue + background worker + library scan scheduler + optional filesystem watcher + browser-authenticated web UI), TOML config, multi-provider orchestration with per-lane circuit breakers, optional acoustic verification and instrumental detection sidecars, and encrypted-at-rest secrets.
 
@@ -8,7 +8,7 @@ A Go CLI tool that fetches synced lyrics from the Musixmatch API (and fallback p
 
 ### Constraints
 
-- **Binary name**: `canticle` (the Go module path remains `github.com/sydlexius/mxlrcgo-svc`; the repo, binary, and Docker image are rebranded to Canticle but the import path is intentionally unchanged)
+- **Binary name**: `canticle` (the Go module path is `github.com/doxazo-net/canticle`, matching the repo. The `cmd/mxlrcgo-svc` directory, config paths under `/etc/mxlrcgo-svc` and `~/.config/mxlrcgo-svc`, and systemd unit names retain the historical `mxlrcgo-svc` string and are intentionally left unchanged)
 - **No CGO**: Must remain CGO_ENABLED=0 for cross-compilation
 - **Go 1.26.2+**: Minimum Go version per go.mod
 - **Behavior preservation**: All existing CLI flags and behaviors must work identically after restructuring

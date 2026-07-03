@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`canticle` (module `github.com/sydlexius/mxlrcgo-svc` -- the import path predates the Canticle rebrand and is intentionally unchanged) is a Go tool for fetching synced lyrics. It has two faces: a one-shot `fetch` CLI that writes `.lrc` / `.txt` files, and a stateful `serve` mode -- an HTTP server with a durable SQLite work queue, a background worker, a library scan scheduler (+ optional filesystem watcher), multi-provider orchestration, encrypted-at-rest secrets, and a browser-authenticated web UI. Global state is eliminated; the API token is externalized; config is TOML.
+`canticle` (module `github.com/doxazo-net/canticle`, matching the repo after the migration to the doxazo-net org; the `cmd/mxlrcgo-svc` directory, config paths, and systemd unit names retain the historical `mxlrcgo-svc` string) is a Go tool for fetching synced lyrics. It has two faces: a one-shot `fetch` CLI that writes `.lrc` / `.txt` files, and a stateful `serve` mode -- an HTTP server with a durable SQLite work queue, a background worker, a library scan scheduler (+ optional filesystem watcher), multi-provider orchestration, encrypted-at-rest secrets, and a browser-authenticated web UI. Global state is eliminated; the API token is externalized; config is TOML.
 
 For deeper detail on the stack, conventions, architecture, and data flow, read `AGENTS.md` -- it is the hand-maintained reference for this codebase. Keep it current when you change the package surface, and read it whenever you need detail this file omits.
 

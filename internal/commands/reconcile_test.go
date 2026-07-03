@@ -11,10 +11,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/db"
-	"github.com/sydlexius/mxlrcgo-svc/internal/lyrics"
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
-	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
+	"github.com/doxazo-net/canticle/internal/db"
+	"github.com/doxazo-net/canticle/internal/lyrics"
+	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/doxazo-net/canticle/internal/queue"
 )
 
 // writeReconcileCfg writes a minimal config pointing the detector at a stub

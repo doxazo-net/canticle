@@ -13,11 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/config"
-	"github.com/sydlexius/mxlrcgo-svc/internal/db"
-	"github.com/sydlexius/mxlrcgo-svc/internal/lyrics"
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
-	"github.com/sydlexius/mxlrcgo-svc/internal/normalize"
+	"github.com/doxazo-net/canticle/internal/config"
+	"github.com/doxazo-net/canticle/internal/db"
+	"github.com/doxazo-net/canticle/internal/lyrics"
+	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/doxazo-net/canticle/internal/normalize"
 )
 
 // ProvenanceCmd hosts nested provenance subcommands.

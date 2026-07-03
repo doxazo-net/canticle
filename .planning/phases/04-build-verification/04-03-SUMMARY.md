@@ -31,7 +31,7 @@ metrics:
 
 README rewritten to accurately reflect the restructured project identity:
 - Badge points to `sydlexius/mxlrcgo-svc` CI workflow
-- Install path: `go install github.com/sydlexius/mxlrcgo-svc/cmd/mxlrcgo-svc@latest`
+- Install path: `go install github.com/doxazo-net/canticle/cmd/mxlrcgo-svc@latest`
 - Go version requirement updated to 1.24+
 - All command examples use `mxlrcgo-svc`
 - New Token Configuration section documents 3 supply methods with priority order

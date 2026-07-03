@@ -1,6 +1,6 @@
 package orchestrator
 
-import "github.com/sydlexius/mxlrcgo-svc/internal/models"
+import "github.com/doxazo-net/canticle/internal/models"
 
 // Quality ranks a lyric result by usefulness. A higher value is strictly
 // better: synced > unsynced > instrumental > none. The orchestrator uses it to

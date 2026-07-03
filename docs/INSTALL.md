@@ -17,7 +17,7 @@ This page compares the available install methods and helps you pick one. For a q
 ## Native packages (Linux)
 
 Download the `.deb`, `.rpm`, or `.apk` for your distro from the
-[GitHub Releases](https://github.com/sydlexius/canticle/releases) page.
+[GitHub Releases](https://github.com/doxazo-net/canticle/releases) page.
 
 ```sh
 # Debian / Ubuntu
@@ -94,7 +94,7 @@ full operational reference.
 
 ## Docker
 
-The published image is `ghcr.io/sydlexius/canticle`. It runs the server on
+The published image is `ghcr.io/doxazo-net/canticle`. It runs the server on
 port `50705` and stores config and the SQLite database under the `/config`
 volume. Mount your media data parent to `/data`:
 
@@ -115,7 +115,7 @@ docker run -d \
   -v canticle-config:/config \
   -v /path/to/your/data:/data:rw \
   --restart unless-stopped \
-  ghcr.io/sydlexius/canticle:latest
+  ghcr.io/doxazo-net/canticle:latest
 ```
 
 For Docker Compose, copy `docker-compose.example.yml`, fill in the token and
@@ -129,7 +129,7 @@ setup.
 ## Homebrew (macOS / Linuxbrew)
 
 ```sh
-brew install sydlexius/tap/canticle
+brew install doxazo-net/tap/canticle
 ```
 
 Upgrade with `brew upgrade canticle`. Run as a background service with
@@ -140,7 +140,7 @@ Upgrade with `brew upgrade canticle`. Run as a background service with
 ## Tarball / zip
 
 Download the archive for your platform from the
-[GitHub Releases](https://github.com/sydlexius/canticle/releases) page,
+[GitHub Releases](https://github.com/doxazo-net/canticle/releases) page,
 extract the binary, and place it on your `PATH`. On Windows, the signed `.zip`
 extracts `canticle.exe`; see the [Windows](USER_GUIDE.md#windows) section of
 the User Guide for NSSM service installation.
@@ -152,13 +152,13 @@ the User Guide for NSSM service installation.
 Requires Go 1.26.4 or later.
 
 ```sh
-go install github.com/sydlexius/mxlrcgo-svc/cmd/mxlrcgo-svc@latest
+go install github.com/doxazo-net/canticle/cmd/mxlrcgo-svc@latest
 ```
 
 Or clone the repository and use `make`:
 
 ```sh
-git clone https://github.com/sydlexius/canticle.git
+git clone https://github.com/doxazo-net/canticle.git
 cd canticle
 make build
 ```

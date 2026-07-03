@@ -33,7 +33,7 @@ Mistakes that cause broken builds, runtime panics, or require rework.
 
 ### Pitfall 2: Module rename breaks all internal imports simultaneously
 
-**What goes wrong:** Changing `go.mod` from `module github.com/fashni/mxlrc-go` to `module github.com/sydlexius/mxlrcgo-svc` breaks every import statement in the project that references the old module path. Since this project is currently flat `package main` with no internal imports, the module rename itself is safe TODAY. But if you restructure first (creating `internal/` packages with `import "github.com/fashni/mxlrc-go/internal/models"`), then rename, you must update every import path. If you rename first, then restructure, the new imports use the correct path from the start.
+**What goes wrong:** Changing `go.mod` from `module github.com/fashni/mxlrc-go` to `module github.com/doxazo-net/canticle` breaks every import statement in the project that references the old module path. Since this project is currently flat `package main` with no internal imports, the module rename itself is safe TODAY. But if you restructure first (creating `internal/` packages with `import "github.com/fashni/mxlrc-go/internal/models"`), then rename, you must update every import path. If you rename first, then restructure, the new imports use the correct path from the start.
 
 **Why it happens:** Go import paths are tied to the module path in `go.mod`. Module rename and package restructuring are two independent operations, but doing them in the wrong order multiplies the work and risk of stale import paths.
 
@@ -103,7 +103,7 @@ Mistakes that cause broken builds, runtime panics, or require rework.
 - `.goreleaser.yml` has `binary: mxlrc-go` -- must become `binary: mxlrcgo-svc`
 - `Makefile` has `go build -o $(BINARY) .` -- must become `go build -o $(BINARY) ./cmd/mxlrcgo-svc`
 - CI workflow (`ci.yml`) has `go build -ldflags="-s -w" -o mxlrc-go .` -- must update both the binary name and the build path
-- `go install` path changes: users now run `go install github.com/sydlexius/mxlrcgo-svc/cmd/mxlrcgo-svc@latest`
+- `go install` path changes: users now run `go install github.com/doxazo-net/canticle/cmd/mxlrcgo-svc@latest`
 
 **Why it happens:** Developers focus on the Go code restructuring and forget that the build pipeline is a separate system with its own hardcoded paths. These failures only surface when CI runs or someone tries `make build`.
 

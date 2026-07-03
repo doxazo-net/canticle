@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/trustnet"
+	"github.com/doxazo-net/canticle/internal/trustnet"
 )
 
 // metricsRequest builds a GET /metrics request from loopback, which is

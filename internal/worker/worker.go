@@ -10,17 +10,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sydlexius/mxlrcgo-svc/internal/backoff"
-	"github.com/sydlexius/mxlrcgo-svc/internal/circuit"
-	"github.com/sydlexius/mxlrcgo-svc/internal/detector"
-	"github.com/sydlexius/mxlrcgo-svc/internal/lyrics"
-	"github.com/sydlexius/mxlrcgo-svc/internal/models"
-	"github.com/sydlexius/mxlrcgo-svc/internal/musixmatch"
-	"github.com/sydlexius/mxlrcgo-svc/internal/normalize"
-	"github.com/sydlexius/mxlrcgo-svc/internal/orchestrator"
-	"github.com/sydlexius/mxlrcgo-svc/internal/providers"
-	"github.com/sydlexius/mxlrcgo-svc/internal/queue"
-	"github.com/sydlexius/mxlrcgo-svc/internal/verification"
+	"github.com/doxazo-net/canticle/internal/backoff"
+	"github.com/doxazo-net/canticle/internal/circuit"
+	"github.com/doxazo-net/canticle/internal/detector"
+	"github.com/doxazo-net/canticle/internal/lyrics"
+	"github.com/doxazo-net/canticle/internal/models"
+	"github.com/doxazo-net/canticle/internal/musixmatch"
+	"github.com/doxazo-net/canticle/internal/normalize"
+	"github.com/doxazo-net/canticle/internal/orchestrator"
+	"github.com/doxazo-net/canticle/internal/providers"
+	"github.com/doxazo-net/canticle/internal/queue"
+	"github.com/doxazo-net/canticle/internal/verification"
 )
 
 // Queue provides durable worker queue operations.
