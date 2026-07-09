@@ -71,7 +71,10 @@ for i in "${!old_paths[@]}"; do
                 printf 'lidarr-rename-sidecars: mkdir failed for %s; skipping\n' "$dst" >&2
                 continue
             fi
-            if mv -- "$src" "$dst"; then
+            # mv -n (no-clobber) closes the TOCTTOU window between the -e test
+            # above and the move: if another process creates $dst in between, the
+            # move is skipped rather than overwriting it.
+            if mv -n -- "$src" "$dst"; then
                 printf 'lidarr-rename-sidecars: moved %s -> %s\n' "$src" "$dst"
                 moved=$((moved + 1))
             else
