@@ -654,6 +654,12 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 			if cfg.InstrumentalDetector.SpeechMaxConfidence <= 0 || cfg.InstrumentalDetector.SpeechMaxConfidence > 1 {
 				cfg.InstrumentalDetector.SpeechMaxConfidence = d.InstrumentalDetector.SpeechMaxConfidence
 			}
+			// Realign.MinConfidence: an out-of-range value from TOML would silently
+			// disable the name guard (<=0) or block every heuristic realign (>1);
+			// reset it to the default just as the env-override path does.
+			if cfg.Realign.MinConfidence <= 0 || cfg.Realign.MinConfidence > 1 {
+				cfg.Realign.MinConfidence = d.Realign.MinConfidence
+			}
 			// SpreadSamples is intentionally NOT re-defaulted: defaults() seeds 6 and
 			// the TOML decode preserves it when the key is omitted, so an explicit
 			// spread_samples = 0 or 1 (single window) survives and is honored.

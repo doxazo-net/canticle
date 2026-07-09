@@ -318,12 +318,26 @@ func finishRealign(out io.Writer, args RealignCmd, cfg config.Config, moves []re
 			}
 			backup = f
 		}
+		// Record the append offset so a failed rename can roll back the just-written
+		// line: os.Rename is atomic, so a returned error means the move did not
+		// happen and the backup must list only moves that actually applied.
+		var backupOffset int64
+		if fi, serr := backup.Stat(); serr == nil {
+			backupOffset = fi.Size()
+		}
 		if berr := appendRealignBackup(backup, mv); berr != nil {
 			slog.Error("realign: backup write failed; skipping move", "orphan", mv.orphan, "error", berr)
 			errCount++
 			continue
 		}
 		if rerr := os.Rename(mv.orphan, mv.target); rerr != nil {
+			// The move did not happen; roll the spurious backup line back so an undo
+			// pass never tries to reverse a rename that never occurred.
+			if terr := backup.Truncate(backupOffset); terr != nil {
+				slog.Warn("realign: failed to roll back backup line after rename failure", "path", backupPath, "error", terr)
+			} else {
+				_ = backup.Sync() //nolint:errcheck // best-effort durability of the rollback truncation
+			}
 			slog.Warn("realign: rename failed; leaving sidecar in place", "orphan", mv.orphan, "target", mv.target, "error", rerr)
 			errCount++
 			continue
@@ -474,6 +488,11 @@ func appendRealignBackup(f *os.File, mv realignMove) error {
 	if _, err := f.Write(append(b, '\n')); err != nil {
 		return fmt.Errorf("write realign backup record: %w", err)
 	}
+	// Flush to disk so the backup-first guarantee survives a crash or power loss
+	// between the record write and the rename it protects.
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync realign backup record: %w", err)
+	}
 	return nil
 }
 
@@ -490,7 +509,17 @@ func destinationBlocked(target, orphan string) bool {
 		return false
 	}
 	_, err := os.Lstat(target)
-	return err == nil
+	if err == nil {
+		return true
+	}
+	if os.IsNotExist(err) {
+		return false
+	}
+	// Existence could not be determined (permission, IO error). Treat the
+	// destination as blocked so realign never risks clobbering a sidecar it
+	// cannot reliably stat.
+	slog.Warn("realign: cannot stat destination; treating as blocked", "target", target, "error", err)
+	return true
 }
 
 // isSidecar reports whether name is a .lrc or .txt lyric sidecar.
