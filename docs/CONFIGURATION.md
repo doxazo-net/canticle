@@ -116,12 +116,13 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES` | `6` | Number of short windows spread across the track and concatenated into one classifier sample. `< 2` disables spreading (single contiguous window). |
 | `MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH` | (auto-discover) | Path to `ffprobe` used to read track duration for spread-sample placement. Empty auto-discovers (sibling of ffmpeg, then PATH). Set this when ffmpeg was auto-provisioned (no ffprobe). |
 | `MXLRC_ENRICHMENT_ENABLED` | `true` | Global default for recording enrichment (reading ISRC, MusicBrainz ID, and duration from audio tags). Per-library and per-run flags override this. |
-| `MXLRC_REALIGN_ENABLED` | `false` | Master switch for the realign feature (the CLI command runs regardless). |
-| `MXLRC_REALIGN_ON_SCAN` | `false` | Run realign automatically after each scan. Reserved. |
+| `MXLRC_REALIGN_ENABLED` | `false` | Master switch for serve-mode reactive realign (watcher/webhook/post-scan). The CLI command runs regardless. |
+| `MXLRC_REALIGN_ON_SCAN` | `false` | Also run a library-wide realign after each scan (watcher/webhook triggers are governed by `enabled` alone). |
 | `MXLRC_REALIGN_REQUIRE_PROVENANCE` | `false` | Only apply exact ISRC/MBID matches; heuristic candidates are reported but skipped. |
 | `MXLRC_REALIGN_CROSS_DIRECTORY` | `false` | Allow an exact match to move a sidecar across directories within a library. |
 | `MXLRC_REALIGN_IDENTITY_KEYS` | `mbid,isrc` | Ordered provenance identifiers the exact tier matches on (valid: `mbid`, `isrc`). |
 | `MXLRC_REALIGN_MIN_CONFIDENCE` | `0.75` | Jaro-Winkler name-guard floor (0-1) for a heuristic rename. |
+| `MXLRC_REALIGN_AUTO_APPLY_HEURISTIC` | `false` | Whether serve-mode reactive realign may auto-apply heuristic (name-similarity) matches; off = exact-only. |
 | `PUID` / `PGID` | `99` / `100` | Container-only: user/group the process drops to for file ownership. |
 
 ## TOML config keys
@@ -328,16 +329,19 @@ identity_keys = ["mbid", "isrc"]
 min_confidence = 0.75
 ```
 
-Governs the `realign` command, which re-attaches orphaned `.lrc` / `.txt` sidecars to renamed audio via a four-tier confidence resolver (see [Realign](CLI_REFERENCE.md#realign)). Defaults are conservative: the feature is off, provenance is not required, matches are confined to the orphan's directory, and identity is matched MBID-first then ISRC.
+Governs the `realign` command, which re-attaches orphaned `.lrc` / `.txt` sidecars to renamed audio via a four-tier confidence resolver (see [Realign](CLI_REFERENCE.md#realign)), and serve mode's reactive realign that runs it automatically. Defaults are conservative: the feature is off, provenance is not required, matches are confined to the orphan's directory, and identity is matched MBID-first then ISRC.
+
+When `enabled`, serve mode runs a scoped realign on three triggers: the filesystem watcher's directory-change events, Lidarr rename/import/upgrade webhooks (complementing `contrib/lidarr-rename-sidecars.sh`; the webhook sweeps both the new and the old/previous directories, so a manual import that strands a sidecar self-heals), and -- when `on_scan` is also set -- after each library scan. Reactive realign always writes a JSONL backup (`<db-dir>/realign-serve-backup.jsonl`), never clobbers an existing sidecar, and auto-applies only exact provenance (ISRC/MBID) matches unless `auto_apply_heuristic` is set. Note that relocating a sidecar to audio in a *different* directory additionally requires `cross_directory` and a provenance tag embedded in the sidecar.
 
 | Key | Env | Default | Meaning |
 |---|---|---|---|
-| `enabled` | `MXLRC_REALIGN_ENABLED` | `false` | Master switch (reserved for on-scan integration and the web UI; the CLI command runs regardless). |
-| `on_scan` | `MXLRC_REALIGN_ON_SCAN` | `false` | Run realign automatically after each scan. Reserved; scheduler wiring is not yet built. |
+| `enabled` | `MXLRC_REALIGN_ENABLED` | `false` | Master switch for serve-mode reactive realign (watcher / webhook / post-scan). The `realign` CLI command runs regardless. |
+| `on_scan` | `MXLRC_REALIGN_ON_SCAN` | `false` | Also run a library-wide realign after each periodic or manual scan (the watcher and webhook triggers are governed by `enabled` alone). |
 | `require_provenance` | `MXLRC_REALIGN_REQUIRE_PROVENANCE` | `false` | Only apply exact (ISRC/MBID) matches; heuristic candidates are reported but skipped. |
 | `cross_directory` | `MXLRC_REALIGN_CROSS_DIRECTORY` | `false` | Allow an exact match to move a sidecar to an audio file in a different directory within the same library. |
 | `identity_keys` | `MXLRC_REALIGN_IDENTITY_KEYS` | `["mbid","isrc"]` | Ordered provenance identifiers the exact tier matches on, most authoritative first. Valid values: `mbid`, `isrc`. |
 | `min_confidence` | `MXLRC_REALIGN_MIN_CONFIDENCE` | `0.75` | Jaro-Winkler name-similarity floor (0-1) for a heuristic rename. When neither side yields an artist/title the check is skipped (positional matching). |
+| `auto_apply_heuristic` | `MXLRC_REALIGN_AUTO_APPLY_HEURISTIC` | `false` | Whether serve-mode reactive realign may auto-apply heuristic (name-similarity) matches. Off = unattended realign applies only exact provenance matches; the manual CLI is unaffected. |
 
 The exact tier requires ISRC/MBID-tagged audio; libraries without those tags fall back to the heuristic tier.
 

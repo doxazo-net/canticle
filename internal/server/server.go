@@ -83,6 +83,7 @@ type Handler struct {
 	stats              StatusReporter
 	metrics            MetricsReporter
 	inventory          Inventory
+	realigner          Realigner
 	allowedRoots       []string
 	pathChecker        func(string) error
 	webui              *web.UI
@@ -138,6 +139,20 @@ func WithAllowedRoots(roots []string) Option {
 		}
 		h.allowedRoots = cleaned
 	}
+}
+
+// Realigner re-attaches orphaned lyric sidecars in a directory. Satisfied by a
+// closure over internal/realign in the composition root. RealignDir applies a
+// scoped, confined, backup-first realign to dir and returns any error.
+type Realigner interface {
+	RealignDir(ctx context.Context, dir string) error
+}
+
+// WithRealigner wires reactive realign triggered by Lidarr rename/import/upgrade
+// webhook events, so a rename that strands a sidecar self-heals without a manual
+// `realign` run. Complements the client-side contrib/lidarr-rename-sidecars.sh.
+func WithRealigner(r Realigner) Option {
+	return func(h *Handler) { h.realigner = r }
 }
 
 // WithPathChecker overrides how the handler tests whether a webhook-provided
@@ -426,10 +441,12 @@ func (h *Handler) handleLidarr(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		slog.Info("lidarr webhook enqueued", "event", event, "count", len(inputs))
+		h.reactiveRealign(r.Context(), event, payload)
 	case "Grab":
 		slog.Info("lidarr grab received", "artist", payload.Artist.ArtistName, "album", payload.Album.Title)
 	case "Rename":
 		slog.Info("lidarr rename received", "artist", payload.Artist.ArtistName, "album", payload.Album.Title)
+		h.reactiveRealign(r.Context(), event, payload)
 	case "Delete":
 		inputs, err := h.metadataInputs(payload)
 		if err != nil {
@@ -454,6 +471,35 @@ func (h *Handler) handleLidarr(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok\n"))
+}
+
+// reactiveRealign runs a scoped, confined realign over the directories a Lidarr
+// event touched -- the new trackFile dirs and the OLD (renamed/deleted) dirs
+// where a sidecar strands when its audio moves. It is best-effort: a nil realigner
+// or any realign error is logged and never fails the webhook response, and it
+// relies on realign's idempotency to stay a no-op after the client-side contrib
+// script has already relocated a sidecar.
+func (h *Handler) reactiveRealign(ctx context.Context, event string, payload lidarrWebhook) {
+	if h.realigner == nil {
+		return
+	}
+	seen := make(map[string]struct{})
+	for _, p := range payload.realignPaths() {
+		// Confine the directory, not the file: an old audio path may already be
+		// deleted (import/rename), but its directory -- holding the stranded
+		// sidecar -- still exists and must resolve within a configured root.
+		confined, ok := h.confinedPayloadPath(filepath.Dir(p))
+		if !ok {
+			continue
+		}
+		if _, dup := seen[confined]; dup {
+			continue
+		}
+		seen[confined] = struct{}{}
+		if err := h.realigner.RealignDir(ctx, confined); err != nil {
+			slog.Warn("reactive realign from lidarr webhook failed; continuing", "event", event, "dir", confined, "error", err)
+		}
+	}
 }
 
 // webhookTracks validates the payload and returns the artist, album, and the
@@ -706,10 +752,17 @@ type lidarrWebhook struct {
 	Track      lidarrTrack       `json:"track"`
 	Tracks     []lidarrTrack     `json:"tracks"`
 	TrackFiles []lidarrTrackFile `json:"trackFiles"`
+	// RenamedTrackFiles carries previousPath on a Rename event; DeletedFiles
+	// carries paths removed by an import/upgrade. Both name the OLD locations
+	// where a sidecar can strand when its audio moves, which is where reactive
+	// realign must look -- not just the new trackFiles paths (#450).
+	RenamedTrackFiles []lidarrTrackFile `json:"renamedTrackFiles"`
+	DeletedFiles      []lidarrTrackFile `json:"deletedFiles"`
 }
 
 type lidarrTrackFile struct {
-	Path string `json:"path"`
+	Path         string `json:"path"`
+	PreviousPath string `json:"previousPath"`
 }
 
 // payloadPaths returns the non-empty trackFile paths carried by the webhook.
@@ -719,6 +772,29 @@ func (p lidarrWebhook) payloadPaths() []string {
 		if path := strings.TrimSpace(tf.Path); path != "" {
 			paths = append(paths, path)
 		}
+	}
+	return paths
+}
+
+// realignPaths returns every path whose directory reactive realign should sweep:
+// the new trackFile paths plus the OLD locations (renamed previousPath, deleted
+// paths) where a sidecar strands when its audio moves.
+func (p lidarrWebhook) realignPaths() []string {
+	var paths []string
+	add := func(s string) {
+		if s = strings.TrimSpace(s); s != "" {
+			paths = append(paths, s)
+		}
+	}
+	for _, tf := range p.TrackFiles {
+		add(tf.Path)
+	}
+	for _, tf := range p.RenamedTrackFiles {
+		add(tf.PreviousPath)
+		add(tf.Path)
+	}
+	for _, tf := range p.DeletedFiles {
+		add(tf.Path)
 	}
 	return paths
 }
