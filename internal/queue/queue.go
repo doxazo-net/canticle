@@ -478,6 +478,21 @@ func (q *DBQueue) Fail(ctx context.Context, id int64, cause error) (WorkItem, er
 	if err != nil {
 		return WorkItem{}, fmt.Errorf("queue: fail: %w", err)
 	}
+
+	// Write the failure back to the linked scan_results rows, mirroring Complete's
+	// and RetireMiss's writeback, so a failed item does not strand the scan ledger
+	// in 'processing' (#454). Scoped to 'processing' so a retryable failure only
+	// clears the wedge and never downgrades a row already marked 'done'.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE scan_results
+         SET status = 'failed'
+         WHERE id IN (SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?)
+           AND status = 'processing'`,
+		id,
+	); err != nil {
+		return WorkItem{}, fmt.Errorf("queue: fail scan_results writeback: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return WorkItem{}, fmt.Errorf("queue: commit fail tx: %w", err)
 	}
@@ -903,13 +918,14 @@ func (q *DBQueue) Retry(ctx context.Context, id int64) (WorkItem, error) {
 		return WorkItem{}, fmt.Errorf("queue: retry: %w", err)
 	}
 	// Reset every linked scan_results row so `scan results` reflects the
-	// retried state. Skip rows already in 'pending' or 'done' so we never
-	// overwrite a terminal outcome.
+	// retried state. Reset both 'processing' rows and the 'failed' rows that
+	// Fail now writes back (#454); skip 'pending'/'done' so we never overwrite a
+	// terminal outcome (both are non-retryable-here states).
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE scan_results
          SET status = 'pending'
          WHERE id IN (SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?)
-           AND status = 'processing'`,
+           AND status IN ('processing', 'failed')`,
 		id,
 	); err != nil {
 		return WorkItem{}, fmt.Errorf("queue: retry scan_results reset: %w", err)
