@@ -40,7 +40,7 @@ mxlrc-go/
 │   └── dependabot.yml
 ├── .planning/                  # Planning documents
 │   └── codebase/               # Codebase analysis docs
-├── go.mod                      # Module: github.com/doxazo-net/canticle, Go 1.25
+├── go.mod                      # Module: github.com/doxazo-net/canticle, Go 1.26.5
 ├── go.sum
 ├── Makefile
 ├── README.md
