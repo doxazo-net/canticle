@@ -434,6 +434,13 @@ type RealignConfig struct {
 	// candidate audio's artist/title. Default 0.75. Values outside (0,1] are reset
 	// to the default. Override: MXLRC_REALIGN_MIN_CONFIDENCE.
 	MinConfidence float64 `toml:"min_confidence"`
+	// AutoApplyHeuristic governs whether serve mode's reactive realign (watcher /
+	// post-scan / webhook) is allowed to auto-apply heuristic-tier matches. Default
+	// false (exact/provenance-verified matches only) so an unattended pass never
+	// renames on a name-similarity guess without an explicit opt-in; the manual
+	// CLI is unaffected (it keeps applying heuristic matches unless
+	// require_provenance is set). Override: MXLRC_REALIGN_AUTO_APPLY_HEURISTIC.
+	AutoApplyHeuristic bool `toml:"auto_apply_heuristic"`
 }
 
 // realignMinConfidenceDefault is the default Jaro-Winkler name-similarity floor
@@ -555,12 +562,13 @@ func defaults() Config {
 		},
 		Enrichment: EnrichmentConfig{Enabled: true},
 		Realign: RealignConfig{
-			Enabled:           false,
-			OnScan:            false,
-			RequireProvenance: false,
-			CrossDirectory:    false,
-			IdentityKeys:      realignIdentityKeysDefault(),
-			MinConfidence:     realignMinConfidenceDefault,
+			Enabled:            false,
+			OnScan:             false,
+			RequireProvenance:  false,
+			CrossDirectory:     false,
+			IdentityKeys:       realignIdentityKeysDefault(),
+			MinConfidence:      realignMinConfidenceDefault,
+			AutoApplyHeuristic: false,
 		},
 		Guard:   GuardConfig{Threshold: guardThresholdDefault},
 		Queue:   QueueConfig{Randomize: true},
@@ -1144,6 +1152,15 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 	if v := os.Getenv("MXLRC_REALIGN_IDENTITY_KEYS"); v != "" {
 		cfg.Realign.IdentityKeys = splitCSV(v)
 		applied["realign.identity_keys"] = true
+	}
+	if v := os.Getenv("MXLRC_REALIGN_AUTO_APPLY_HEURISTIC"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_REALIGN_AUTO_APPLY_HEURISTIC", "value", v, "current", cfg.Realign.AutoApplyHeuristic) //nolint:gosec // G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.Realign.AutoApplyHeuristic = enabled
+			applied["realign.auto_apply_heuristic"] = true
+		}
 	}
 	if v := os.Getenv("MXLRC_REALIGN_MIN_CONFIDENCE"); v != "" {
 		n, err := strconv.ParseFloat(v, 64)

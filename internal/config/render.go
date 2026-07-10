@@ -130,6 +130,7 @@ func FormatConfigText(cfg Config, envSrc, cliSrc map[string]bool) string {
 	p("cross_directory = %t%s\n", cfg.Realign.CrossDirectory, ann("realign.cross_directory"))
 	p("identity_keys = %s%s\n", sliceVal("realign.identity_keys", cfg.Realign.IdentityKeys), ann("realign.identity_keys"))
 	p("min_confidence = %g%s\n", cfg.Realign.MinConfidence, ann("realign.min_confidence"))
+	p("auto_apply_heuristic = %t%s\n", cfg.Realign.AutoApplyHeuristic, ann("realign.auto_apply_heuristic"))
 	p("\n")
 
 	// [guard]
@@ -349,6 +350,7 @@ func ConfigToSlogAttrs(cfg Config, envSrc, cliSrc map[string]bool) []slog.Attr {
 			boolAttr("cross_directory", "realign.cross_directory", cfg.Realign.CrossDirectory),
 			sliceAttr("identity_keys", "realign.identity_keys", cfg.Realign.IdentityKeys),
 			floatAttr("min_confidence", "realign.min_confidence", cfg.Realign.MinConfidence),
+			boolAttr("auto_apply_heuristic", "realign.auto_apply_heuristic", cfg.Realign.AutoApplyHeuristic),
 		),
 		group("guard",
 			sliceAttr("accepted_scripts", "guard.accepted_scripts", cfg.Guard.AcceptedScripts),

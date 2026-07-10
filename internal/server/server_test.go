@@ -55,6 +55,106 @@ func (f *fakeQueue) Cleanup(_ context.Context, inputs models.Inputs) (int64, err
 	return 1, nil
 }
 
+type fakeRealigner struct{ dirs []string }
+
+func (f *fakeRealigner) RealignDir(_ context.Context, dir string) error {
+	f.dirs = append(f.dirs, dir)
+	return nil
+}
+
+// TestLidarrWebhookRenameRealignsOldAndNewDirs verifies the reactive realign
+// trigger sweeps both the OLD (previousPath) directory -- where a sidecar strands
+// on a move -- and the new directory, each confined to a library root.
+func TestLidarrWebhookRenameRealignsOldAndNewDirs(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("evalsymlinks: %v", err)
+	}
+	oldDir := filepath.Join(root, "OldArtist", "Album")
+	newDir := filepath.Join(root, "NewArtist", "Album")
+	if err := os.MkdirAll(oldDir, 0o755); err != nil {
+		t.Fatalf("mkdir old: %v", err)
+	}
+	if err := os.MkdirAll(newDir, 0o755); err != nil {
+		t.Fatalf("mkdir new: %v", err)
+	}
+	oldPath := filepath.Join(oldDir, "01. track.flac") // moved away; dir still holds the sidecar
+	newPath := filepath.Join(newDir, "01. track.flac")
+	if err := os.WriteFile(newPath, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write new: %v", err)
+	}
+
+	a := &fakeAuth{}
+	q := &fakeQueue{}
+	fr := &fakeRealigner{}
+	h := NewHandler(a, q, "lyrics", WithAllowedRoots([]string{root}), WithRealigner(fr))
+	body := `{"eventType":"Rename","artist":{"artistName":"Artist"},"album":{"title":"Album"},` +
+		`"renamedTrackFiles":[{"previousPath":"` + oldPath + `","path":"` + newPath + `"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/lidarr?apikey=key", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	h.bgRealign.Wait() // realign runs in a detached goroutine; wait for it before asserting
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body %q", rec.Code, rec.Body.String())
+	}
+	got := map[string]bool{}
+	for _, d := range fr.dirs {
+		got[d] = true
+	}
+	if !got[oldDir] {
+		t.Errorf("realign not run on old dir %q; got dirs %v", oldDir, fr.dirs)
+	}
+	if !got[newDir] {
+		t.Errorf("realign not run on new dir %q; got dirs %v", newDir, fr.dirs)
+	}
+}
+
+// TestLidarrWebhookDownloadRealignsTrackAndDeletedDirs verifies an import
+// (Download) event realigns the new trackFile directory and the directory of a
+// replaced/deleted file (the manual-import abandonment case).
+func TestLidarrWebhookDownloadRealignsTrackAndDeletedDirs(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("evalsymlinks: %v", err)
+	}
+	newDir := filepath.Join(root, "New", "Album")
+	delDir := filepath.Join(root, "Old", "Album")
+	for _, d := range []string{newDir, delDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	newPath := filepath.Join(newDir, "01. track.flac")
+	if err := os.WriteFile(newPath, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	delPath := filepath.Join(delDir, "01. old.flac") // deleted; dir still holds the sidecar
+
+	a := &fakeAuth{}
+	q := &fakeQueue{}
+	fr := &fakeRealigner{}
+	h := NewHandler(a, q, "lyrics", WithAllowedRoots([]string{root}), WithRealigner(fr), WithInventory(nil))
+	body := `{"eventType":"Download","artist":{"artistName":"A"},"album":{"title":"Album"},` +
+		`"tracks":[{"title":"track"}],"trackFiles":[{"path":"` + newPath + `"}],` +
+		`"deletedFiles":[{"path":"` + delPath + `"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/lidarr?apikey=key", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	h.bgRealign.Wait() // realign runs in a detached goroutine; wait for it before asserting
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body %q", rec.Code, rec.Body.String())
+	}
+	got := map[string]bool{}
+	for _, d := range fr.dirs {
+		got[d] = true
+	}
+	if !got[newDir] || !got[delDir] {
+		t.Errorf("realign dirs = %v; want both new %q and deleted %q", fr.dirs, newDir, delDir)
+	}
+}
+
 func TestLidarrWebhookDownloadEnqueuesBeforeOK(t *testing.T) {
 	a := &fakeAuth{}
 	q := &fakeQueue{}

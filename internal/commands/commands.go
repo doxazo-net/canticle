@@ -38,6 +38,7 @@ import (
 	"github.com/doxazo-net/canticle/internal/providers"
 	"github.com/doxazo-net/canticle/internal/prune"
 	"github.com/doxazo-net/canticle/internal/queue"
+	"github.com/doxazo-net/canticle/internal/realign"
 	"github.com/doxazo-net/canticle/internal/scan"
 	"github.com/doxazo-net/canticle/internal/scanfail"
 	"github.com/doxazo-net/canticle/internal/scanner"
@@ -996,6 +997,15 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		server.WithInventory(scan.New(sqlDB)),
 		server.WithAllowedRoots(allowedRoots),
 	}
+	// Reactive realign on Lidarr rename/import/upgrade webhooks (#450), gated by
+	// realign.enabled. Self-heals a sidecar stranded by a rename/move without a
+	// manual `realign` run; confined to the payload's directories.
+	if cfg.Realign.Enabled {
+		handlerOpts = append(handlerOpts, server.WithRealigner(serverRealigner{
+			realigner:  realign.New(library.New(sqlDB), cfg.Realign),
+			backupPath: realignServeBackupPath(cfg),
+		}))
+	}
 	if cfg.Server.WebUIEnabled {
 		// Mount the authenticated web UI (#204, lane 4): session login gates the
 		// page routes, and onboarding redirects them to /setup until an admin
@@ -1509,13 +1519,15 @@ func configureWriterBilingual(w lyrics.Writer, cfg config.Config) {
 func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args ServeCmd, cacheRepo *cache.CacheRepo) {
 	// serve has no per-run detect override; resolve per library against the global
 	// default (and the per-library setting) at enqueue time.
+	// Periodic scans realign only when realign.enabled AND realign.on_scan.
+	rlg, rlgBackup := serveRealigner(sqlDB, cfg, true)
 	s := scheduler(sqlDB, scanner.ScanOptions{
 		Update:         args.Update,
 		Upgrade:        args.Upgrade,
 		MaxDepth:       args.Depth,
 		BFS:            args.BFS,
 		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
-	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo)
+	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup)
 	// serve has no per-run enrichment override; resolve per library against the
 	// global default (and the per-library setting) inside the scheduler.
 	s.GlobalEnrichDefault = cfg.Enrichment.Enabled
@@ -1576,13 +1588,17 @@ func watcherConfigFromCentral(cfg config.Config) watcher.Config {
 }
 
 func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watcher.Config, cfg config.Config, cacheRepo *cache.CacheRepo) {
+	// The watcher's ScanFunc is a subtree (RunOnceForPath) scan, so realign is
+	// scoped to the changed directory. It is gated by realign.enabled alone (not
+	// on_scan, which governs full periodic/manual scans).
+	rlg, rlgBackup := serveRealigner(sqlDB, cfg, false)
 	sched := scheduler(sqlDB, scanner.ScanOptions{
 		Update:         args.Update,
 		Upgrade:        args.Upgrade,
 		MaxDepth:       args.Depth,
 		BFS:            args.BFS,
 		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
-	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo)
+	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup)
 	sched.GlobalEnrichDefault = cfg.Enrichment.Enabled
 	pruner := prune.New(sqlDB)
 	wch := watcher.New(watchCfg, library.New(sqlDB), func(ctx context.Context, lib models.Library, path string) error {
@@ -1679,13 +1695,16 @@ func runScan(ctx context.Context, out io.Writer, args ScanCmd) int {
 		_, _ = fmt.Fprintln(out, err)
 		return 1
 	}
+	// A manual scan realigns only when realign.enabled AND realign.on_scan (both
+	// off by default, so no behavior change unless opted in).
+	rlg, rlgBackup := serveRealigner(sqlDB, cfg, true)
 	s := scheduler(sqlDB, scanner.ScanOptions{
 		Update:         args.Update,
 		Upgrade:        args.Upgrade,
 		MaxDepth:       args.Depth,
 		BFS:            args.BFS,
 		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
-	}, detectOverride, cfg.InstrumentalDetector.Enabled, nil)
+	}, detectOverride, cfg.InstrumentalDetector.Enabled, nil, rlg, rlgBackup)
 	s.EnrichOverride = enrichOverride
 	s.GlobalEnrichDefault = cfg.Enrichment.Enabled
 	if len(args.Libraries) > 0 {
@@ -1768,7 +1787,7 @@ func resolveDetectOverride(detect, noDetect bool) (*bool, error) {
 // already-cached tracks at enqueue time; pass the worker's shared repo in serve
 // mode so the /metrics hit-rate covers scheduler lookups too (#308),
 // or nil for a one-shot scan (a fresh, uncounted repo is created).
-func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, globalDetectDefault bool, cacheRepo *cache.CacheRepo) scan.Scheduler {
+func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, globalDetectDefault bool, cacheRepo *cache.CacheRepo, realigner *realign.Realigner, realignBackupPath string) scan.Scheduler {
 	results := scan.New(sqlDB)
 	if cacheRepo == nil {
 		cacheRepo = cache.New(sqlDB)
@@ -1798,9 +1817,89 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 			}
 			slog.Info("scheduled scan complete",
 				"library", lib.Name, "found", len(found), "enqueued", enqueued, "cache_hits", cacheHits)
+			reactiveRealign(ctx, realigner, realignBackupPath, lib, found)
 			return nil
 		},
 	}
+}
+
+// reactiveRealign runs a scoped realign over the directories touched by a scan's
+// results, self-healing orphaned sidecars left by a rename. It is best-effort:
+// realign failures are logged and never abort the scan (the scan already
+// succeeded). A nil realigner disables it.
+// reactiveRealignMu serializes every serve-mode reactive realign pass (watcher /
+// post-scan / webhook). All three write the one shared backup file
+// (realignServeBackupPath) and Apply rolls a failed rename back by truncating it;
+// concurrent writers would let one pass truncate away another's committed record.
+// Serializing also makes a later pass observe an earlier pass's applied move
+// (its plan-time destinationBlocked then trips), so two concurrent passes cannot
+// both target the same audio and clobber. Realign passes are bounded and
+// best-effort, so the coarse lock is cheap.
+var reactiveRealignMu sync.Mutex
+
+func reactiveRealign(ctx context.Context, realigner *realign.Realigner, backupPath string, lib models.Library, found []models.ScanResult) {
+	if realigner == nil {
+		return
+	}
+	dirs := make(map[string]struct{})
+	for _, r := range found {
+		if r.FilePath != "" {
+			dirs[filepath.Dir(r.FilePath)] = struct{}{}
+		}
+	}
+	var moved, errored int
+	for dir := range dirs {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		reactiveRealignMu.Lock()
+		_, applied, err := realigner.ReactiveDir(lib, dir, backupPath)
+		reactiveRealignMu.Unlock()
+		if err != nil {
+			slog.Warn("reactive realign failed for directory; continuing", "library", lib.Name, "dir", dir, "error", err)
+			continue
+		}
+		m, _, e := realign.CountApplied(applied)
+		moved += m
+		errored += e
+	}
+	if moved > 0 || errored > 0 {
+		slog.Info("reactive realign re-attached orphaned sidecars", "library", lib.Name, "moved", moved, "errors", errored)
+	}
+}
+
+// realignServeBackupPath is the append-only JSONL backup that serve-mode reactive
+// realign records applied moves to, next to the database.
+func realignServeBackupPath(cfg config.Config) string {
+	return filepath.Join(filepath.Dir(cfg.DB.Path), "realign-serve-backup.jsonl")
+}
+
+// serverRealigner adapts internal/realign to the server.Realigner interface for
+// the Lidarr webhook trigger: it resolves the owning library for a confined
+// directory and applies a scoped realign there.
+type serverRealigner struct {
+	realigner  *realign.Realigner
+	backupPath string
+}
+
+func (s serverRealigner) RealignDir(ctx context.Context, dir string) error {
+	// Serialize with the scheduler/watcher reactive passes so the shared backup
+	// file is never truncated by a racing writer (see reactiveRealignMu).
+	reactiveRealignMu.Lock()
+	defer reactiveRealignMu.Unlock()
+	_, _, err := s.realigner.ResolveAndRealignDir(ctx, dir, s.backupPath)
+	return err
+}
+
+// serveRealigner builds the reactive realigner for a scan trigger, or (nil, "")
+// when reactive realign is disabled. realign.enabled is the master gate;
+// requireOnScan additionally requires realign.on_scan (for the periodic and manual
+// scan triggers -- the watcher path passes false so realign.enabled alone gates it).
+func serveRealigner(sqlDB *sql.DB, cfg config.Config, requireOnScan bool) (*realign.Realigner, string) {
+	if !cfg.Realign.Enabled || (requireOnScan && !cfg.Realign.OnScan) {
+		return nil, ""
+	}
+	return realign.New(library.New(sqlDB), cfg.Realign), realignServeBackupPath(cfg)
 }
 
 func runLibrary(ctx context.Context, out io.Writer, args LibraryCmd) int {

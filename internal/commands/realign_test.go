@@ -75,6 +75,15 @@ func writeMP3(t *testing.T, dir, name, artist, title, isrc, mbid string) {
 	}
 }
 
+// realignBackupRecord mirrors the JSONL shape internal/realign writes, decoded
+// here to assert applied moves without exporting the package's internal type.
+type realignBackupRecord struct {
+	OldPath   string `json:"old_path"`
+	NewPath   string `json:"new_path"`
+	LibraryID int64  `json:"library_id"`
+	Method    string `json:"method"`
+}
+
 func readBackupRecords(t *testing.T, dir string) []realignBackupRecord {
 	t.Helper()
 	matches, err := filepath.Glob(filepath.Join(dir, "realign-backup-*.jsonl"))

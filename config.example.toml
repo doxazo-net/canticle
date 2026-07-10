@@ -361,13 +361,19 @@ enabled = true
 # skipped). It only changes a sidecar's stem, never its extension. Drive it with
 # `canticle realign` (dry-run) / `canticle realign --yes`.
 
-# Master switch for the feature (reserved for on-scan integration and the web
-# UI). The realign CLI command runs regardless of this flag. Default false.
-# Env: MXLRC_REALIGN_ENABLED.
+# Master switch for serve-mode reactive realign: when true, serve mode runs a
+# scoped realign on the filesystem watcher's directory-change events, on Lidarr
+# rename/import/upgrade webhooks (complementing contrib/lidarr-rename-sidecars.sh),
+# and -- if on_scan is also set -- after each library scan. Reactive realign
+# always writes the JSONL backup (<db-dir>/realign-serve-backup.jsonl), never
+# clobbers, and auto-applies only exact provenance matches unless
+# auto_apply_heuristic is set. The `canticle realign` CLI runs regardless of this
+# flag. Default false. Env: MXLRC_REALIGN_ENABLED.
 enabled = false
 
-# Run realign automatically after each library scan. Reserved; the scheduler
-# wiring is not yet built. Default false. Env: MXLRC_REALIGN_ON_SCAN.
+# When enabled, also run a library-wide realign after each periodic or manual
+# library scan (the watcher and webhook triggers are governed by `enabled` alone).
+# Default false. Env: MXLRC_REALIGN_ON_SCAN.
 on_scan = false
 
 # Only apply moves backed by an exact ISRC/MBID match; heuristic candidates are
@@ -390,6 +396,13 @@ identity_keys = ["mbid", "isrc"]
 # skipped and pure positional matching applies. Default 0.75.
 # Env: MXLRC_REALIGN_MIN_CONFIDENCE.
 min_confidence = 0.75
+
+# Whether serve-mode reactive realign may auto-apply heuristic (name-similarity)
+# matches. Default false: unattended realign applies only exact provenance
+# (ISRC/MBID) matches, so a name-based guess is never auto-applied without this
+# opt-in. The manual `canticle realign` CLI is unaffected (it applies heuristic
+# matches unless require_provenance is set). Env: MXLRC_REALIGN_AUTO_APPLY_HEURISTIC.
+auto_apply_heuristic = false
 
 [guard]
 # Optional language/script guard. It rejects fetched lyrics whose body is
