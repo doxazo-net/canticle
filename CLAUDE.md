@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `canticle` (module `github.com/doxazo-net/canticle`, matching the repo after the migration to the doxazo-net org; the `cmd/mxlrcgo-svc` directory, config paths, and systemd unit names retain the historical `mxlrcgo-svc` string) is a Go tool for fetching synced lyrics. It has two faces: a one-shot `fetch` CLI that writes `.lrc` / `.txt` files, and a stateful `serve` mode -- an HTTP server with a durable SQLite work queue, a background worker, a library scan scheduler (+ optional filesystem watcher), multi-provider orchestration, encrypted-at-rest secrets, and a browser-authenticated web UI. Global state is eliminated; the API token is externalized; config is TOML.
 
-For the full per-package reference, see the "Package catalogue" section below. Deeper stack and convention detail is discoverable from `go.mod`, the `Makefile` (`make help`), `.golangci.yml`, and `docs/DEVELOPER.md` -- keep the catalogue current when the package surface changes.
+For the full per-package reference, see the "Package catalog" section below. Deeper stack and convention detail is discoverable from `go.mod`, the `Makefile` (`make help`), `.golangci.yml`, and `docs/DEVELOPER.md` -- keep the catalog current when the package surface changes.
 
 ## What to work on next
 
@@ -25,9 +25,9 @@ Run `make hooks` once to enable the tracked git hooks, and `make gate` before pu
 
 ## Architecture (one-paragraph orientation)
 
-Cmd/internal layout. `cmd/mxlrcgo-svc/main.go` is the only entry point and owns no business logic; it parses the subcommand tree, loads config + DB, builds the dependency graph, and dispatches. The command tree lives in `internal/commands` (`fetch`, `serve`, `scan`, `library`, `keys`, `secrets`, `config`, `queue`, `provenance`, `realign`, `completion`). Two principal paths run under `internal/`: **fetch mode** -- `scanner` parses CLI/text-file/directory input into an in-memory `queue.InputsQueue`, `app` drains it sequentially, `musixmatch` fetches (a `Fetcher` interface), and `lyrics` writes `.lrc` / `.txt` / instrumental output (a `Writer` interface); and **serve mode** -- a `scan` scheduler over `library` roots enqueues work into the durable SQLite `queue.DBQueue`, a `worker` drains it through the multi-provider `orchestrator` (Musixmatch + petitlyrics `providers`, each behind a `circuit` breaker with `backoff` retry), consulting `cache`, gated by optional `verification` / `detector` sidecars (via `ffmpeg`) and `langguard`, fronted by the `server` HTTP handler (`auth` API keys, `trustnet` IP gating, optional `servetls`) and the `web` browser UI (`webauth` sessions). Shared infra: `config` (TOML, XDG paths, token precedence CLI > env > file), `db` (pure-Go SQLite `modernc.org/sqlite`, no CGO, goose migrations in `internal/db/migrations/`), `secrets` (AES-256-GCM at rest), `normalize` (NFKC cache keys), `models` (shared types, depends on nothing else internal). Dependencies are injected through interfaces -- mock at the boundary; there is no global mutable state. See the "Package catalogue" below for the full `internal/`/`web/` surface.
+Cmd/internal layout. `cmd/mxlrcgo-svc/main.go` is the only entry point and owns no business logic; it parses the subcommand tree, loads config + DB, builds the dependency graph, and dispatches. The command tree lives in `internal/commands` (`fetch`, `serve`, `scan`, `library`, `keys`, `secrets`, `config`, `queue`, `provenance`, `realign`, `completion`). Two principal paths run under `internal/`: **fetch mode** -- `scanner` parses CLI/text-file/directory input into an in-memory `queue.InputsQueue`, `app` drains it sequentially, `musixmatch` fetches (a `Fetcher` interface), and `lyrics` writes `.lrc` / `.txt` / instrumental output (a `Writer` interface); and **serve mode** -- a `scan` scheduler over `library` roots enqueues work into the durable SQLite `queue.DBQueue`, a `worker` drains it through the multi-provider `orchestrator` (Musixmatch + petitlyrics `providers`, each behind a `circuit` breaker with `backoff` retry), consulting `cache`, gated by optional `verification` / `detector` sidecars (via `ffmpeg`) and `langguard`, fronted by the `server` HTTP handler (`auth` API keys, `trustnet` IP gating, optional `servetls`) and the `web` browser UI (`webauth` sessions). Shared infra: `config` (TOML, XDG paths, token precedence CLI > env > file), `db` (pure-Go SQLite `modernc.org/sqlite`, no CGO, goose migrations in `internal/db/migrations/`), `secrets` (AES-256-GCM at rest), `normalize` (NFKC cache keys), `models` (shared types, depends on nothing else internal). Dependencies are injected through interfaces -- mock at the boundary; there is no global mutable state. See the "Package catalog" below for the full `internal/`/`web/` surface.
 
-## Package catalogue
+## Package catalog
 
 Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the sole entry point; everything else lives under `internal/` (the directory matches the package name) except the embedded web assets under `web/`.
 
@@ -37,7 +37,7 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the sole ent
 - `petitlyrics` -- petitlyrics.com provider adapter, used as a fallback lane.
 - `providers` -- provider abstraction (`LyricsProvider`, `Fetcher`, `AdaptivePacer`) plus provider-generation/version invalidation that retires stale cache entries when the provider set changes.
 - `orchestrator` -- multi-lane orchestration (`Lane`, `Orchestrator`, parallel-race + suitability scoring); composes `providers` with per-lane `circuit` breakers.
-- `circuit` -- concurrency-safe per-lane circuit breaker modelling a provider's rate-limit/throttle response.
+- `circuit` -- concurrency-safe per-lane circuit breaker modeling a provider's rate-limit/throttle response.
 - `backoff` -- shared retry-delay formula (1m, 2m, 4m, ..., capped at 1h) used by the worker, durable queue, and fetch loop.
 - `lyrics` -- LRC/TXT/instrumental writer (`Writer`, `LRCWriter`), `Slugify`, an `.lrc` parser, provenance-tag embedding, and fsync helpers.
 - `normalize` -- NFKC cache-key normalization, duration bucketing, fuzzy-match confidence, album-artist resolution.
@@ -110,7 +110,7 @@ Everything else (formatting, naming, file layout) is enforced by `gofmt` + `.gol
 
 ## PR Workflow
 
-Use the global slash commands (maintained outside this repo) for the full workflow: `/prep-pr` to open a PR, `/handle-review` to triage bot comments, `/merge-pr` to merge + clean up. The full command catalogue and typical flow live in the user-global instructions, not here.
+Use the global slash commands (maintained outside this repo) for the full workflow: `/prep-pr` to open a PR, `/handle-review` to triage bot comments, `/merge-pr` to merge + clean up. The full command catalog and typical flow live in the user-global instructions, not here.
 
 ### Reading PR comments (gh API gotcha)
 
