@@ -701,6 +701,46 @@ func TestDBQueue_CompleteAtomicallyWritesScanResultsDone(t *testing.T) {
 	}
 }
 
+// TestDBQueue_FailWritesScanResultsFailed: Fail must flip the linked scan_results
+// row out of 'processing' (to 'failed') so a failed work item does not leave the
+// scan ledger wedged in 'processing' indefinitely (#454).
+func TestDBQueue_FailWritesScanResultsFailed(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	scanID := insertScanResult(t, sqlDB, "/music/failwb.mp3") // seeded status='processing'
+	q := NewDBQueue(sqlDB)
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+
+	if _, err := q.Enqueue(ctx, models.Inputs{
+		Track:        models.Track{ArtistName: "Artist", TrackName: "FailWB"},
+		ScanResultID: scanID,
+	}, 1); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	item, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if _, err := q.Fail(ctx, item.ID, errors.New("boom")); err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+
+	var queueStatus, scanStatus string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT status FROM work_queue WHERE id = ?`, item.ID).Scan(&queueStatus); err != nil {
+		t.Fatalf("read work_queue: %v", err)
+	}
+	if err := sqlDB.QueryRowContext(ctx, `SELECT status FROM scan_results WHERE id = ?`, scanID).Scan(&scanStatus); err != nil {
+		t.Fatalf("read scan_results: %v", err)
+	}
+	if queueStatus != "failed" {
+		t.Fatalf("work_queue status = %q; want failed", queueStatus)
+	}
+	if scanStatus != "failed" {
+		t.Fatalf("scan_results status = %q; want failed (Fail must not strand the row in processing, #454)", scanStatus)
+	}
+}
+
 func TestDBQueue_CompleteWithoutScanResultIDLeavesLedgerUntouched(t *testing.T) {
 	ctx := context.Background()
 	sqlDB := openQueueTestDB(t)
@@ -1382,6 +1422,50 @@ func TestDBQueue_RetryResetsLinkedScanResults(t *testing.T) {
 		if status != StatusPending {
 			t.Fatalf("scan_results %d status = %q; want %q (Retry must reset every linked processing row)", id, status, StatusPending)
 		}
+	}
+}
+
+// TestDBQueue_RetryResetsFailedScanResults: after Fail writes scan_results back
+// to 'failed' (#454), Retry must reset that 'failed' row to 'pending' so the two
+// ledgers stay consistent through the retry, with no manual re-seed in between.
+func TestDBQueue_RetryResetsFailedScanResults(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	scanID := insertScanResult(t, sqlDB, "/music/retry-failed.mp3")
+	q := NewDBQueue(sqlDB)
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+
+	item, err := q.Enqueue(ctx, models.Inputs{
+		Track:        models.Track{ArtistName: "Artist", TrackName: "RetryFailed"},
+		ScanResultID: scanID,
+	}, 1)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if _, err := q.Fail(ctx, item.ID, errors.New("boom")); err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+	// Natural post-Fail state: scan_results is 'failed', not 'processing'.
+	var afterFail string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT status FROM scan_results WHERE id = ?`, scanID).Scan(&afterFail); err != nil {
+		t.Fatalf("read scan_results: %v", err)
+	}
+	if afterFail != "failed" {
+		t.Fatalf("post-Fail scan_results = %q; want failed", afterFail)
+	}
+	if _, err := q.Retry(ctx, item.ID); err != nil {
+		t.Fatalf("Retry: %v", err)
+	}
+	var afterRetry string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT status FROM scan_results WHERE id = ?`, scanID).Scan(&afterRetry); err != nil {
+		t.Fatalf("read scan_results: %v", err)
+	}
+	if afterRetry != StatusPending {
+		t.Fatalf("post-Retry scan_results = %q; want %q (Retry must reset the failed row)", afterRetry, StatusPending)
 	}
 }
 
