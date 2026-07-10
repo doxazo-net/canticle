@@ -290,23 +290,44 @@ func (r *Realigner) Apply(moves []Move, backupPath string, policy Policy) (appli
 			}
 			backup = f
 		}
-		// Backup first (skip this move if it fails), then the atomic rename, then
-		// fsync the destination dir. os.Rename is atomic, so a returned error means
-		// the move did not happen and the just-written backup line is rolled back.
+		// Backup first (skip this move if it fails), then a clobber-safe atomic
+		// rename, then fsync the destination dir. The just-written backup line is
+		// rolled back on any post-write failure -- but only when we captured a
+		// valid pre-write offset. If Stat failed we skip the truncation rather
+		// than zero the whole file (Truncate(0) would delete prior backup history).
 		var backupOffset int64
+		haveOffset := false
 		if fi, serr := backup.Stat(); serr == nil {
 			backupOffset = fi.Size()
+			haveOffset = true
 		}
 		if berr := appendBackup(backup, mv); berr != nil {
 			applied = append(applied, Applied{Move: mv, Err: fmt.Errorf("backup write failed: %w", berr)})
 			continue
 		}
-		if rerr := os.Rename(mv.Orphan, mv.Target); rerr != nil {
-			if terr := backup.Truncate(backupOffset); terr != nil {
-				slog.Warn("realign: failed to roll back backup line after rename failure", "path", backupPath, "error", terr)
-			} else {
-				_ = backup.Sync() //nolint:errcheck // best-effort durability of the rollback truncation
+		rollbackBackup := func(cause string, err error) {
+			if !haveOffset {
+				slog.Warn("realign: backup offset unknown; leaving possibly un-applied record in backup rather than truncating", "path", backupPath, "cause", cause, "error", err)
+				return
 			}
+			if terr := backup.Truncate(backupOffset); terr != nil {
+				slog.Warn("realign: failed to roll back backup line", "path", backupPath, "cause", cause, "error", terr)
+				return
+			}
+			_ = backup.Sync() //nolint:errcheck // best-effort durability of the rollback truncation
+		}
+		// Re-check the destination immediately before the rename so Apply stays
+		// clobber-safe even when moves from independently planned libraries are
+		// merged into one slice -- the plan-time claimed map is per-plan, not
+		// run-wide, and os.Rename would otherwise overwrite an existing sidecar
+		// on POSIX.
+		if destinationBlocked(mv.Target, mv.Orphan) {
+			rollbackBackup("destination blocked", nil)
+			applied = append(applied, Applied{Move: mv, Err: fmt.Errorf("destination exists: %s", mv.Target)})
+			continue
+		}
+		if rerr := os.Rename(mv.Orphan, mv.Target); rerr != nil {
+			rollbackBackup("rename failed", rerr)
 			applied = append(applied, Applied{Move: mv, Err: fmt.Errorf("rename: %w", rerr)})
 			continue
 		}

@@ -368,3 +368,50 @@ func TestApply_RequireProvenanceGatesHeuristic(t *testing.T) {
 		t.Errorf("gated orphan should remain in place: %v", err)
 	}
 }
+
+// TestApply_RefusesClobberAcrossMergedPlans: two eligible moves that target the
+// same destination -- as can happen when per-library plans (each with its own
+// claimed map) are concatenated before a single Apply -- must not clobber. Apply
+// re-checks the destination just before rename, applies the first, and refuses
+// the second with an error, leaving the second orphan and the first move's
+// content untouched.
+func TestApply_RefusesClobberAcrossMergedPlans(t *testing.T) {
+	root := tempRoot(t)
+	target := filepath.Join(root, "D", "Song.lrc")
+	orphan1 := filepath.Join(root, "A", "first.lrc")
+	orphan2 := filepath.Join(root, "B", "second.lrc")
+	write(t, orphan1, "FIRST")
+	write(t, orphan2, "SECOND")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatalf("mkdir target dir: %v", err)
+	}
+
+	r, _ := newRealigner(root, defaultCfg(), nil)
+	moves := []Move{
+		{Orphan: orphan1, Target: target, Method: "exact", LibraryID: 1, Eligible: true},
+		{Orphan: orphan2, Target: target, Method: "exact", LibraryID: 2, Eligible: true},
+	}
+	applied, err := r.Apply(moves, filepath.Join(t.TempDir(), "b.jsonl"), Policy{})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(applied) != 2 {
+		t.Fatalf("applied len = %d; want 2", len(applied))
+	}
+	if applied[0].Err != nil {
+		t.Errorf("first move should apply cleanly, got err: %v", applied[0].Err)
+	}
+	if applied[1].Err == nil {
+		t.Error("second move onto an existing destination should be refused with an error")
+	}
+	if _, serr := os.Stat(orphan2); serr != nil {
+		t.Errorf("refused second orphan should remain in place: %v", serr)
+	}
+	got, rerr := os.ReadFile(target) //nolint:gosec // G304: test-controlled path under a temp root
+	if rerr != nil {
+		t.Fatalf("read target: %v", rerr)
+	}
+	if string(got) != "FIRST" {
+		t.Errorf("target content = %q; want %q (second move must not clobber the first)", got, "FIRST")
+	}
+}
