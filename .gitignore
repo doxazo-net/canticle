@@ -59,3 +59,6 @@ docs/design/
 # AI assistant config (local only — except shared release metadata)
 .claude/*
 !.claude/release.toml
+
+# Orchestrate session checkpoint (machine-local, transient; never committed)
+/SESSION-STATE.md
