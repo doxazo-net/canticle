@@ -147,13 +147,16 @@ func (r *Repairer) Run(ctx context.Context, opts Options) (Result, error) {
 			res.Changed++
 			if opts.Report != nil {
 				if err := opts.Report(ch); err != nil {
-					return res, err
+					return res, fmt.Errorf("identityrepair: report change for scan_result %d: %w", ch.ScanResultID, err)
 				}
 			}
 			continue
 		}
 
-		outcome, err := r.apply(ctx, ch, rw.titleKey)
+		// opts.Report runs INSIDE apply's transaction, before commit, so the
+		// restorable backup record is durable before the correction it protects
+		// commits (backup-first) and a report failure rolls the change back.
+		outcome, err := r.apply(ctx, ch, rw.titleKey, opts.Report)
 		if err != nil {
 			return res, err
 		}
@@ -164,11 +167,6 @@ func (r *Repairer) Run(ctx context.Context, opts Options) (Result, error) {
 		res.Changed++
 		res.QueueUpdated += outcome.queueUpdated
 		res.QueueMerged += outcome.queueMerged
-		if opts.Report != nil {
-			if err := opts.Report(ch); err != nil {
-				return res, err
-			}
-		}
 	}
 	return res, nil
 }
@@ -216,7 +214,7 @@ type applyOutcome struct {
 // inside a single transaction. When the linked queue row (at either the old or
 // the corrected key) is mid-flight ('processing'), the entire change is skipped
 // so scan_results and work_queue never drift apart.
-func (r *Repairer) apply(ctx context.Context, ch Change, titleKey string) (applyOutcome, error) {
+func (r *Repairer) apply(ctx context.Context, ch Change, titleKey string, report func(Change) error) (applyOutcome, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return applyOutcome{}, fmt.Errorf("identityrepair: begin tx: %w", err)
@@ -261,7 +259,25 @@ func (r *Repairer) apply(ctx context.Context, ch Change, titleKey string) (apply
 	var out applyOutcome
 	switch {
 	case oldID == 0:
-		// No coupled queue row (never enqueued, or already completed and pruned).
+		// No queue row at the OLD key. Usually the row was never enqueued, or a
+		// sibling scan sharing this identity already re-keyed the shared queue row
+		// to the SAME corrected key (consistent -- keep the link). The exception is
+		// the divergent case: a queue row shared by scans whose corrected identities
+		// differ, where a sibling re-keyed it to a DIFFERENT key, leaving this
+		// scan_result linked to a queue row of the wrong identity. Drop any junction
+		// link to a queue row that is NOT at this scan's corrected (artist_key,
+		// title_key) so the row re-enqueues cleanly on the next scan instead of
+		// carrying a mismatched link.
+		if keyChanged {
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM work_queue_scan_results
+				 WHERE scan_result_id = ?
+				   AND work_queue_id IN (
+				       SELECT id FROM work_queue WHERE NOT (artist_key = ? AND title_key = ?))`,
+				ch.ScanResultID, ch.NewArtistKey, titleKey); err != nil {
+				return applyOutcome{}, fmt.Errorf("identityrepair: drop stale junction links for scan_result %d: %w", ch.ScanResultID, err)
+			}
+		}
 	case !keyChanged:
 		// Artist unchanged but album-artist differs: sync the display columns; the
 		// key is stable so no conflict is possible.
@@ -285,6 +301,16 @@ func (r *Repairer) apply(ctx context.Context, ch Change, titleKey string) (apply
 			return applyOutcome{}, err
 		}
 		out.queueMerged = 1
+	}
+
+	// Write the restorable backup record (report) before committing, so a report
+	// failure aborts via the deferred rollback -- the correction is never applied
+	// without its record (backup-first), and the report never over-records a row a
+	// commit failure later rolls back.
+	if report != nil {
+		if err := report(ch); err != nil {
+			return applyOutcome{}, fmt.Errorf("identityrepair: report change for scan_result %d: %w", ch.ScanResultID, err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -366,23 +392,26 @@ func mergeQueueRows(ctx context.Context, tx *sql.Tx, dropID, keepID int64, keepS
 }
 
 // unionOutputPaths returns the JSON output_paths of keepID and dropID merged and
-// de-duplicated by (outdir, filename), keep's entries first. An empty or invalid
-// column is treated as no paths so a merge never fails on legacy data.
+// de-duplicated by (outdir, filename), keep's entries first. When a row's
+// output_paths column is empty or unparsable, its write targets are
+// reconstructed from its linked scan_results (outdir, filename) rather than
+// dropped -- otherwise deleting the merged row would permanently lose a file's
+// rewrite target for legacy or corrupt rows.
 func unionOutputPaths(ctx context.Context, tx *sql.Tx, keepID, dropID int64) (string, error) {
 	read := func(id int64) ([]models.OutputPath, error) {
 		var raw string
 		if err := tx.QueryRowContext(ctx, `SELECT output_paths FROM work_queue WHERE id = ?`, id).Scan(&raw); err != nil {
 			return nil, fmt.Errorf("identityrepair: read output_paths of work_queue %d: %w", id, err)
 		}
-		if raw == "" {
-			return nil, nil
+		if raw != "" {
+			var paths []models.OutputPath
+			if err := json.Unmarshal([]byte(raw), &paths); err == nil && len(paths) > 0 {
+				return paths, nil
+			}
+			// Empty array or malformed JSON: fall through to reconstruction so the
+			// row's write targets are not silently lost when it is deleted.
 		}
-		var paths []models.OutputPath
-		if err := json.Unmarshal([]byte(raw), &paths); err != nil {
-			// Malformed legacy JSON must not abort the merge; treat as no paths.
-			return nil, nil
-		}
-		return paths, nil
+		return reconstructOutputPaths(ctx, tx, id)
 	}
 	keep, err := read(keepID)
 	if err != nil {
@@ -406,4 +435,31 @@ func unionOutputPaths(ctx context.Context, tx *sql.Tx, keepID, dropID int64) (st
 		return "", fmt.Errorf("identityrepair: marshal unioned output_paths: %w", err)
 	}
 	return string(b), nil
+}
+
+// reconstructOutputPaths rebuilds a queue row's write targets from the outdir /
+// filename of its linked scan_results, used when its output_paths column is
+// empty or unparsable so a merge never discards a recoverable rewrite target.
+func reconstructOutputPaths(ctx context.Context, tx *sql.Tx, workQueueID int64) ([]models.OutputPath, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT sr.outdir, sr.filename FROM scan_results sr
+		 JOIN work_queue_scan_results j ON j.scan_result_id = sr.id
+		 WHERE j.work_queue_id = ? AND sr.outdir != '' AND sr.filename != ''`,
+		workQueueID)
+	if err != nil {
+		return nil, fmt.Errorf("identityrepair: reconstruct output_paths for work_queue %d: %w", workQueueID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []models.OutputPath
+	for rows.Next() {
+		var p models.OutputPath
+		if err := rows.Scan(&p.Outdir, &p.Filename); err != nil {
+			return nil, fmt.Errorf("identityrepair: scan reconstructed path: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("identityrepair: iterate reconstructed paths: %w", err)
+	}
+	return out, nil
 }

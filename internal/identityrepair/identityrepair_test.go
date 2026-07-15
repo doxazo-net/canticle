@@ -3,7 +3,6 @@ package identityrepair
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -385,14 +384,22 @@ func TestRun_ConflictProcessingSkipped(t *testing.T) {
 	}
 }
 
-// A merge tolerates legacy/empty and malformed output_paths without failing:
-// an empty survivor column and a non-JSON dropped column both degrade to "no
-// paths", and the union still produces valid JSON.
-func TestRun_MergeUnionsLegacyOutputPaths(t *testing.T) {
+// When the dropped row's output_paths is malformed (and the survivor's empty),
+// the merge reconstructs both rows' write targets from their linked
+// scan_results rather than losing them, so the deleted row's file remains a
+// rewrite target.
+func TestRun_MergeReconstructsLostOutputPaths(t *testing.T) {
 	db := openDB(t)
 	lib := seedLibrary(t, db)
-	srBad := seedScan(t, db, lib, "/m/1.mp3", "AlphaBravo", "", "Song")
-	srGood := seedScan(t, db, lib, "/m/2.mp3", "Alpha; Bravo", "", "Song")
+	srBad := seedScan(t, db, lib, "/m/1.mp3", "AlphaBravo", "", "Song")    // outdir /out, filename f.lrc
+	srGood := seedScan(t, db, lib, "/m/2.mp3", "Alpha; Bravo", "", "Song") // outdir /out, filename f.lrc
+	// Give the two scans distinct write targets so both are observable.
+	if _, err := db.Exec(`UPDATE scan_results SET outdir = '/a', filename = 'bad.lrc' WHERE id = ?`, srBad); err != nil {
+		t.Fatalf("set srBad target: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE scan_results SET outdir = '/b', filename = 'good.lrc' WHERE id = ?`, srGood); err != nil {
+		t.Fatalf("set srGood target: %v", err)
+	}
 	wqBad := seedQueue(t, db, "AlphaBravo", "", "pending", srBad)
 	wqGood := seedQueue(t, db, "Alpha; Bravo", "", "pending", srGood)
 	// Survivor has a legacy-empty column; the dropped row has malformed JSON.
@@ -411,27 +418,81 @@ func TestRun_MergeUnionsLegacyOutputPaths(t *testing.T) {
 	if res.QueueMerged != 1 {
 		t.Fatalf("Result = %+v; want QueueMerged=1", res)
 	}
-	// The survivor's output_paths is valid JSON (empty array, both inputs empty).
+	// The dropped row's target (reconstructed from srBad) survives in the union.
 	op := queueOutputPaths(t, db, wqGood)
-	var paths []struct{ Outdir, Filename string }
-	if err := json.Unmarshal([]byte(op), &paths); err != nil {
-		t.Errorf("survivor output_paths %q is not valid JSON: %v", op, err)
+	if !strings.Contains(op, "bad.lrc") {
+		t.Errorf("survivor output_paths = %q; want the dropped row's reconstructed target bad.lrc", op)
+	}
+	if !strings.Contains(op, "good.lrc") {
+		t.Errorf("survivor output_paths = %q; want the survivor's reconstructed target good.lrc", op)
 	}
 }
 
-// A Report error aborts the run.
-func TestRun_ReportError(t *testing.T) {
+// The divergent shared-row case: two scans share one mangled queue row but
+// re-read to DIFFERENT corrected identities. The first re-keys the shared row;
+// the second must not stay linked to that now-wrong-identity row -- its stale
+// junction link is dropped so it re-enqueues cleanly.
+func TestRun_DivergentSharedRow(t *testing.T) {
 	db := openDB(t)
 	lib := seedLibrary(t, db)
-	seedScan(t, db, lib, "/m/1.mp3", "AlphaBravo", "", "Song")
+	srA := seedScan(t, db, lib, "/m/1.mp3", "AB C", "", "Song")
+	srB := seedScan(t, db, lib, "/m/2.mp3", "AB C", "", "Song")
+	// Force both scans onto one shared mangled queue row (same old key/title).
+	if _, err := db.Exec(`UPDATE scan_results SET artist_key = 'abc' WHERE id IN (?, ?)`, srA, srB); err != nil {
+		t.Fatalf("force shared key: %v", err)
+	}
+	wq := seedQueue(t, db, "AB C", "", "pending", srA)
+	if _, err := db.Exec(`UPDATE work_queue SET artist_key = 'abc' WHERE id = ?`, wq); err != nil {
+		t.Fatalf("force queue key: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`, wq, srB); err != nil {
+		t.Fatalf("link srB to shared row: %v", err)
+	}
+
+	// The two files correct to DIFFERENT identities.
+	reader := fakeReader{"/m/1.mp3": {"A; BC", ""}, "/m/2.mp3": {"AB; C", ""}}
+	if _, err := New(db, reader.read).Run(context.Background(), Options{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// The shared row is re-keyed to whichever scan processed first (srA -> "a; bc").
+	// srB corrected to "ab; c" must NOT remain linked to that row.
+	var srBLinkedToWq int
+	if err := db.QueryRow(
+		`SELECT count(*) FROM work_queue_scan_results WHERE work_queue_id = ? AND scan_result_id = ?`, wq, srB).Scan(&srBLinkedToWq); err != nil {
+		t.Fatalf("count srB link: %v", err)
+	}
+	if srBLinkedToWq != 0 {
+		t.Errorf("srB still linked to the re-keyed shared row; want the stale link dropped")
+	}
+	// srB's own identity is still corrected in scan_results.
+	if a, _, k := scanIdentity(t, db, srB); a != "AB; C" || k != normalize.NormalizeKey("AB; C") {
+		t.Errorf("srB scan_results = (%q,%q); want corrected to AB; C", a, k)
+	}
+}
+
+// A Report failure in apply mode aborts the run AND rolls the correction back:
+// the report (backup) is written inside the transaction before commit, so a
+// report error must leave the stored identity unchanged.
+func TestRun_ReportFailureRollsBack(t *testing.T) {
+	db := openDB(t)
+	lib := seedLibrary(t, db)
+	sr := seedScan(t, db, lib, "/m/1.mp3", "AlphaBravo", "", "Song")
+	wq := seedQueue(t, db, "AlphaBravo", "", "pending", sr)
 
 	reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}}
-	wantErr := errReport
 	_, err := New(db, reader.read).Run(context.Background(), Options{
-		Report: func(Change) error { return wantErr },
+		Report: func(Change) error { return errReport },
 	})
-	if err != wantErr {
-		t.Fatalf("Run err = %v; want %v", err, wantErr)
+	if !errors.Is(err, errReport) {
+		t.Fatalf("Run err = %v; want wrapped %v", err, errReport)
+	}
+	// Rolled back: both tables keep the pre-correction identity.
+	if a, _, _ := scanIdentity(t, db, sr); a != "AlphaBravo" {
+		t.Errorf("scan_results mutated despite report failure: artist = %q", a)
+	}
+	if a, _, _ := queueIdentity(t, db, wq); a != "AlphaBravo" {
+		t.Errorf("work_queue mutated despite report failure: artist = %q", a)
 	}
 }
 
