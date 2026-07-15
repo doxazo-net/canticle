@@ -23,9 +23,11 @@ package identityrepair
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 
+	"github.com/doxazo-net/canticle/internal/models"
 	"github.com/doxazo-net/canticle/internal/normalize"
 )
 
@@ -233,11 +235,14 @@ func (r *Repairer) apply(ctx context.Context, ch Change, titleKey string) (apply
 
 	keyChanged := ch.NewArtistKey != ch.OldArtistKey
 
-	// When the key changes, a row may already occupy the corrected key. If that
-	// row is in-flight, skip rather than disturb it.
+	// When the key changes AND there is an old-key queue row to re-key, a row may
+	// already occupy the corrected key. If that row is in-flight, skip rather than
+	// disturb it. With no old-key row (oldID == 0) nothing touches the queue, so a
+	// conflict at the corrected key is irrelevant and must not gate the harmless
+	// scan_results correction.
 	var conflictID int64
 	var conflictStatus string
-	if keyChanged {
+	if keyChanged && oldID != 0 {
 		conflictID, conflictStatus, err = queueRowAt(ctx, tx, ch.NewArtistKey, titleKey, oldID)
 		if err != nil {
 			return applyOutcome{}, err
@@ -276,7 +281,7 @@ func (r *Repairer) apply(ctx context.Context, ch Change, titleKey string) (apply
 		out.queueUpdated = 1
 	default:
 		// A row already holds the corrected key: merge the old-key row into it.
-		if err := mergeQueueRows(ctx, tx, oldID, oldStatus, conflictID, conflictStatus, ch.ScanResultID); err != nil {
+		if err := mergeQueueRows(ctx, tx, oldID, conflictID, conflictStatus, ch.ScanResultID); err != nil {
 			return applyOutcome{}, err
 		}
 		out.queueMerged = 1
@@ -308,16 +313,35 @@ func queueRowAt(ctx context.Context, tx *sql.Tx, artistKey, titleKey string, exc
 }
 
 // mergeQueueRows folds the old-key queue row (dropID) into the row already at the
-// corrected key (keepID): the more-advanced status is preserved on the keeper,
-// the dropped row's scan_result links are re-pointed, and the dropped row is
-// deleted. The current scan_result is explicitly linked to the keeper so the
-// association survives even if it lived only on the dropped row's scalar link.
-func mergeQueueRows(ctx context.Context, tx *sql.Tx, dropID int64, dropStatus string, keepID int64, keepStatus string, scanResultID int64) error {
-	if statusRank(dropStatus) > statusRank(keepStatus) {
+// corrected key (keepID) so the two duplicate identities collapse to one queue
+// row that will (re)write every linked file's lyrics.
+//
+// The survivor's output_paths are unioned with the dropped row's, so both files'
+// sidecar targets are covered. The survivor's status is NOT fabricated -- doing
+// so would break the invariant that a 'done' work_queue row implies its linked
+// scan_results are 'done' (queue.Complete). Instead, a survivor that already
+// completed is reopened to 'pending' so the worker re-fetches and writes the
+// newly-unioned paths (the write is idempotent for the already-satisfied one); a
+// survivor that has not completed keeps its status and picks up the merged paths
+// on its next run. The dropped row's scan_result links (and the current
+// scan_result, in case it lived only on the dropped row's scalar link) are
+// re-pointed to the survivor before the dropped row is deleted.
+func mergeQueueRows(ctx context.Context, tx *sql.Tx, dropID, keepID int64, keepStatus string, scanResultID int64) error {
+	merged, err := unionOutputPaths(ctx, tx, keepID, dropID)
+	if err != nil {
+		return err
+	}
+	if keepStatus == "done" {
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE work_queue SET status = ? WHERE id = ?`, dropStatus, keepID); err != nil {
-			return fmt.Errorf("identityrepair: promote work_queue %d status: %w", keepID, err)
+			`UPDATE work_queue
+			 SET output_paths = ?, status = 'pending', attempts = 0,
+			     next_attempt_at = '1970-01-01T00:00:00Z', last_error = '', completed_at = NULL
+			 WHERE id = ?`, merged, keepID); err != nil {
+			return fmt.Errorf("identityrepair: reopen merged work_queue %d: %w", keepID, err)
 		}
+	} else if _, err := tx.ExecContext(ctx,
+		`UPDATE work_queue SET output_paths = ? WHERE id = ?`, merged, keepID); err != nil {
+		return fmt.Errorf("identityrepair: union output_paths into work_queue %d: %w", keepID, err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT OR IGNORE INTO work_queue_scan_results (work_queue_id, scan_result_id)
@@ -341,21 +365,45 @@ func mergeQueueRows(ctx context.Context, tx *sql.Tx, dropID int64, dropStatus st
 	return nil
 }
 
-// statusRank orders work_queue statuses by how much completed work they
-// represent, so a merge preserves the most valuable state (a 'done' fetch is
-// never downgraded to 'pending'). 'processing' rows never reach a merge (they
-// abort the change earlier), so their rank is only a guard.
-func statusRank(status string) int {
-	switch status {
-	case "done":
-		return 4
-	case "processing":
-		return 3
-	case "failed", "deferred":
-		return 2
-	case "pending":
-		return 1
-	default:
-		return 0
+// unionOutputPaths returns the JSON output_paths of keepID and dropID merged and
+// de-duplicated by (outdir, filename), keep's entries first. An empty or invalid
+// column is treated as no paths so a merge never fails on legacy data.
+func unionOutputPaths(ctx context.Context, tx *sql.Tx, keepID, dropID int64) (string, error) {
+	read := func(id int64) ([]models.OutputPath, error) {
+		var raw string
+		if err := tx.QueryRowContext(ctx, `SELECT output_paths FROM work_queue WHERE id = ?`, id).Scan(&raw); err != nil {
+			return nil, fmt.Errorf("identityrepair: read output_paths of work_queue %d: %w", id, err)
+		}
+		if raw == "" {
+			return nil, nil
+		}
+		var paths []models.OutputPath
+		if err := json.Unmarshal([]byte(raw), &paths); err != nil {
+			// Malformed legacy JSON must not abort the merge; treat as no paths.
+			return nil, nil
+		}
+		return paths, nil
 	}
+	keep, err := read(keepID)
+	if err != nil {
+		return "", err
+	}
+	drop, err := read(dropID)
+	if err != nil {
+		return "", err
+	}
+	seen := make(map[string]bool, len(keep)+len(drop))
+	out := make([]models.OutputPath, 0, len(keep)+len(drop))
+	for _, p := range append(keep, drop...) {
+		k := p.Outdir + "\x00" + p.Filename
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, p)
+		}
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return "", fmt.Errorf("identityrepair: marshal unioned output_paths: %w", err)
+	}
+	return string(b), nil
 }

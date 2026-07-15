@@ -3,9 +3,11 @@ package identityrepair
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	dbpkg "github.com/doxazo-net/canticle/internal/db"
@@ -75,10 +77,12 @@ func seedScan(t *testing.T, db *sql.DB, libID int64, filePath, artist, albumArti
 func seedQueue(t *testing.T, db *sql.DB, artist, albumArtist, status string, scanID int64) int64 {
 	t.Helper()
 	const title = "Song"
+	// A distinct output path per row so a merge's output_paths union is observable.
+	outputPaths := fmt.Sprintf(`[{"outdir":"/out","filename":"f%d.lrc"}]`, scanID)
 	res, err := db.Exec(
-		`INSERT INTO work_queue (artist, title, album_artist, artist_key, title_key, status)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		artist, title, albumArtist, normalize.NormalizeKey(artist), normalize.NormalizeKey(title), status)
+		`INSERT INTO work_queue (artist, title, album_artist, artist_key, title_key, status, output_paths)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		artist, title, albumArtist, normalize.NormalizeKey(artist), normalize.NormalizeKey(title), status, outputPaths)
 	if err != nil {
 		t.Fatalf("seed work_queue: %v", err)
 	}
@@ -87,6 +91,16 @@ func seedQueue(t *testing.T, db *sql.DB, artist, albumArtist, status string, sca
 		t.Fatalf("seed junction: %v", err)
 	}
 	return id
+}
+
+// queueOutputPaths returns the raw output_paths JSON of a work_queue row.
+func queueOutputPaths(t *testing.T, db *sql.DB, id int64) string {
+	t.Helper()
+	var raw string
+	if err := db.QueryRow(`SELECT output_paths FROM work_queue WHERE id = ?`, id).Scan(&raw); err != nil {
+		t.Fatalf("read output_paths %d: %v", id, err)
+	}
+	return raw
 }
 
 func scanIdentity(t *testing.T, db *sql.DB, id int64) (artist, albumArtist, artistKey string) {
@@ -170,9 +184,12 @@ func TestRun_DryRun(t *testing.T) {
 }
 
 // On a key collision, the old-key queue row is merged into the row already at
-// the corrected key; the more-advanced status is preserved and the merged row
-// is deleted.
-func TestRun_MergeOnConflict(t *testing.T) {
+// the corrected key: their output_paths are unioned, the merged row is deleted,
+// both scan_results link to the survivor, and a survivor that had already
+// completed is reopened so the re-fetch writes the newly-linked file's lyrics
+// (never fabricating a 'done' status that would violate the scan_results
+// invariant).
+func TestRun_MergeReopensDoneSurvivor(t *testing.T) {
 	db := openDB(t)
 	lib := seedLibrary(t, db)
 	srBad := seedScan(t, db, lib, "/m/1.mp3", "AlphaBravo", "", "Song")
@@ -194,14 +211,18 @@ func TestRun_MergeOnConflict(t *testing.T) {
 	if n := queueCount(t, db); n != 1 {
 		t.Fatalf("work_queue count = %d; want 1 (bad merged into good)", n)
 	}
-	// The surviving row is the good one, still 'done'.
-	if _, _, status := queueIdentity(t, db, wqGood); status != "done" {
-		t.Errorf("surviving work_queue status = %q; want done", status)
+	// The 'done' survivor is reopened so it re-fetches and writes both files.
+	if _, _, status := queueIdentity(t, db, wqGood); status != "pending" {
+		t.Errorf("survivor status = %q; want pending (reopened, not fabricated done)", status)
+	}
+	// Its output_paths now cover both files.
+	op := queueOutputPaths(t, db, wqGood)
+	if !strings.Contains(op, fmt.Sprintf("f%d.lrc", srBad)) || !strings.Contains(op, fmt.Sprintf("f%d.lrc", srGood)) {
+		t.Errorf("survivor output_paths = %q; want both f%d.lrc and f%d.lrc", op, srBad, srGood)
 	}
 	if err := db.QueryRow(`SELECT 1 FROM work_queue WHERE id = ?`, wqBad).Scan(new(int)); err != sql.ErrNoRows {
 		t.Errorf("bad work_queue row still present; want deleted (err=%v)", err)
 	}
-	// Both scan_results now link to the survivor.
 	var links int
 	if err := db.QueryRow(`SELECT count(*) FROM work_queue_scan_results WHERE work_queue_id = ?`, wqGood).Scan(&links); err != nil {
 		t.Fatalf("count junction: %v", err)
@@ -313,15 +334,16 @@ func TestRun_NoQueueRow(t *testing.T) {
 	}
 }
 
-// On merge, when the old-key row holds the more-advanced status, the surviving
-// row is promoted so completed work is not downgraded.
-func TestRun_MergePromotesStatus(t *testing.T) {
+// A not-yet-completed survivor keeps its own status on merge (never downgraded
+// or fabricated) and absorbs the dropped row's output_paths, so its pending
+// fetch will write both files.
+func TestRun_MergeKeepsPendingSurvivor(t *testing.T) {
 	db := openDB(t)
 	lib := seedLibrary(t, db)
 	srBad := seedScan(t, db, lib, "/m/1.mp3", "AlphaBravo", "", "Song")
 	srGood := seedScan(t, db, lib, "/m/2.mp3", "Alpha; Bravo", "", "Song")
-	seedQueue(t, db, "AlphaBravo", "", "done", srBad)                 // old-key row: done
-	wqGood := seedQueue(t, db, "Alpha; Bravo", "", "pending", srGood) // keeper: pending
+	seedQueue(t, db, "AlphaBravo", "", "done", srBad)                 // dropped row: done
+	wqGood := seedQueue(t, db, "Alpha; Bravo", "", "pending", srGood) // survivor: pending
 
 	reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}, "/m/2.mp3": {"Alpha; Bravo", ""}}
 	res, err := New(db, reader.read).Run(context.Background(), Options{})
@@ -331,8 +353,12 @@ func TestRun_MergePromotesStatus(t *testing.T) {
 	if res.QueueMerged != 1 {
 		t.Fatalf("Result = %+v; want QueueMerged=1", res)
 	}
-	if _, _, status := queueIdentity(t, db, wqGood); status != "done" {
-		t.Errorf("keeper status = %q; want promoted to done", status)
+	if _, _, status := queueIdentity(t, db, wqGood); status != "pending" {
+		t.Errorf("survivor status = %q; want unchanged pending (no fabricated done)", status)
+	}
+	op := queueOutputPaths(t, db, wqGood)
+	if !strings.Contains(op, fmt.Sprintf("f%d.lrc", srBad)) || !strings.Contains(op, fmt.Sprintf("f%d.lrc", srGood)) {
+		t.Errorf("survivor output_paths = %q; want both files' paths unioned", op)
 	}
 }
 
@@ -359,22 +385,37 @@ func TestRun_ConflictProcessingSkipped(t *testing.T) {
 	}
 }
 
-// A merge promotes a pending keeper to 'failed' when the dropped row was failed,
-// exercising the mid-rank status path.
-func TestRun_MergeFailedIntoPending(t *testing.T) {
+// A merge tolerates legacy/empty and malformed output_paths without failing:
+// an empty survivor column and a non-JSON dropped column both degrade to "no
+// paths", and the union still produces valid JSON.
+func TestRun_MergeUnionsLegacyOutputPaths(t *testing.T) {
 	db := openDB(t)
 	lib := seedLibrary(t, db)
 	srBad := seedScan(t, db, lib, "/m/1.mp3", "AlphaBravo", "", "Song")
 	srGood := seedScan(t, db, lib, "/m/2.mp3", "Alpha; Bravo", "", "Song")
-	seedQueue(t, db, "AlphaBravo", "", "failed", srBad)
+	wqBad := seedQueue(t, db, "AlphaBravo", "", "pending", srBad)
 	wqGood := seedQueue(t, db, "Alpha; Bravo", "", "pending", srGood)
+	// Survivor has a legacy-empty column; the dropped row has malformed JSON.
+	if _, err := db.Exec(`UPDATE work_queue SET output_paths = '' WHERE id = ?`, wqGood); err != nil {
+		t.Fatalf("blank survivor output_paths: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE work_queue SET output_paths = 'not json' WHERE id = ?`, wqBad); err != nil {
+		t.Fatalf("corrupt dropped output_paths: %v", err)
+	}
 
 	reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}, "/m/2.mp3": {"Alpha; Bravo", ""}}
-	if _, err := New(db, reader.read).Run(context.Background(), Options{}); err != nil {
+	res, err := New(db, reader.read).Run(context.Background(), Options{})
+	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if _, _, status := queueIdentity(t, db, wqGood); status != "failed" {
-		t.Errorf("keeper status = %q; want promoted to failed", status)
+	if res.QueueMerged != 1 {
+		t.Fatalf("Result = %+v; want QueueMerged=1", res)
+	}
+	// The survivor's output_paths is valid JSON (empty array, both inputs empty).
+	op := queueOutputPaths(t, db, wqGood)
+	var paths []struct{ Outdir, Filename string }
+	if err := json.Unmarshal([]byte(op), &paths); err != nil {
+		t.Errorf("survivor output_paths %q is not valid JSON: %v", op, err)
 	}
 }
 

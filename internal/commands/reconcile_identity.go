@@ -191,8 +191,11 @@ func markIdentityBackfillDone(ctx context.Context, sqlDB *sql.DB) error {
 	return nil
 }
 
-// appendReconcileIdentityBackup writes one JSONL record for a corrected row and
-// flushes it, so the backup is durable before the correction it protects.
+// appendReconcileIdentityBackup writes and fsyncs one JSONL record per corrected
+// row. It is called after the correction commits (an audit trail of what
+// changed, not a pre-image write-ahead log), so a crash between the commit and
+// this write can under-record; the record captures the before/after identity so
+// a correction can still be reversed by hand from it.
 func appendReconcileIdentityBackup(f *os.File, ch identityrepair.Change) error {
 	rec := reconcileIdentityBackupRecord{
 		ScanResultID:   ch.ScanResultID,
