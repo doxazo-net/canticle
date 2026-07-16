@@ -2,6 +2,7 @@ package lrcbackfill
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,7 +21,7 @@ func TestNormalizeFile_SkipsWhenBackupExists(t *testing.T) {
 	if err := os.WriteFile(p+".orig", []byte("UNRELATED\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	res, err := NormalizeFile(p)
+	res, err := NormalizeFile(p, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,6 +51,12 @@ func TestRun_TalliesSkippedAndErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(bad, 0o644) }) // let TempDir cleanup remove it
+	// 0o000 does not guarantee an unreadable file on every runner (e.g. root, or
+	// some filesystems), so verify the premise deterministically before asserting
+	// the error tally.
+	if _, rerr := os.ReadFile(bad); rerr == nil { //nolint:gosec // test probe
+		t.Skip("runner can read a 0o000 file; cannot exercise the unreadable-file error path")
+	}
 
 	s, err := Run(Options{Roots: []string{dir}, Apply: true})
 	if err != nil {
@@ -63,6 +70,28 @@ func TestRun_TalliesSkippedAndErrors(t *testing.T) {
 	}
 	if s.Errors != 1 {
 		t.Errorf("want 1 error (unreadable file), got %d", s.Errors)
+	}
+}
+
+func TestNormalizeFile_ReportFailureRollsBackAndAborts(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "s.lrc")
+	orig := "[00:30.00][01:05.00]C\n"
+	if err := os.WriteFile(p, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	boom := errors.New("record failed")
+	_, err := NormalizeFile(p, func(string) error { return boom })
+	if !errors.Is(err, boom) {
+		t.Fatalf("want the report error, got %v", err)
+	}
+	// The .lrc must NOT have been rewritten (report ran before the rewrite).
+	if got, _ := os.ReadFile(p); string(got) != orig {
+		t.Errorf(".lrc mutated despite report failure: %q", string(got))
+	}
+	// The just-created backup must be rolled back so a re-run retries cleanly.
+	if _, serr := os.Stat(p + ".orig"); !os.IsNotExist(serr) {
+		t.Error(".orig backup not rolled back after report failure")
 	}
 }
 
@@ -121,7 +150,7 @@ func TestNormalizeFile_CleanFileUntouched(t *testing.T) {
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	res, err := NormalizeFile(p)
+	res, err := NormalizeFile(p, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,13 +174,13 @@ func TestNormalizeFile_IdempotentAndNeverOverwritesBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	// First pass normalizes and backs up.
-	if res, err := NormalizeFile(p); err != nil || res.Status != StatusNormalized {
+	if res, err := NormalizeFile(p, nil); err != nil || res.Status != StatusNormalized {
 		t.Fatalf("first pass: status=%v err=%v", res.Status, err)
 	}
 	afterFirst, _ := os.ReadFile(p)
 
 	// Second pass is a no-op (already expanded), and must NOT overwrite .orig.
-	res, err := NormalizeFile(p)
+	res, err := NormalizeFile(p, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +205,7 @@ func TestNormalizeFile_SkipsSymlink(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("symlink unsupported: %v", err)
 	}
-	res, err := NormalizeFile(link)
+	res, err := NormalizeFile(link, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +225,7 @@ func TestNormalizeFile_ExpandsAndBacksUp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := NormalizeFile(p)
+	res, err := NormalizeFile(p, nil)
 	if err != nil {
 		t.Fatalf("NormalizeFile: %v", err)
 	}

@@ -58,7 +58,15 @@ func Run(opts Options) (Summary, error) {
 			var res Result
 			var ferr error
 			if opts.Apply {
-				res, ferr = NormalizeFile(path)
+				// report writes the undo record before the rewrite; NormalizeFile
+				// aborts (and rolls back the backup) if it fails.
+				var report func(string) error
+				if opts.Backup != nil {
+					report = func(backupPath string) error {
+						return writeBackupRecord(opts.Backup, path, backupPath)
+					}
+				}
+				res, ferr = NormalizeFile(path, report)
 			} else {
 				res, ferr = inspect(path)
 			}
@@ -70,11 +78,6 @@ func Run(opts Options) (Summary, error) {
 			switch res.Status {
 			case StatusNormalized:
 				s.Normalized++
-				if opts.Apply && opts.Backup != nil {
-					if err := writeBackupRecord(opts.Backup, path, res.Backup); err != nil {
-						return fmt.Errorf("write backup record: %w", err)
-					}
-				}
 			case StatusClean:
 				s.Clean++
 			case StatusSkipped:
@@ -94,8 +97,15 @@ func writeBackupRecord(w io.Writer, path, backup string) error {
 	if err != nil {
 		return err
 	}
-	_, err = w.Write(append(line, '\n'))
-	return err
+	if _, err := w.Write(append(line, '\n')); err != nil {
+		return err
+	}
+	// Flush the record to stable storage before the caller replaces the .lrc, so
+	// the undo trail is durable ahead of the mutation it protects.
+	if s, ok := w.(interface{ Sync() error }); ok {
+		return s.Sync()
+	}
+	return nil
 }
 
 // Status is the outcome of processing a single .lrc file.
@@ -121,7 +131,12 @@ type Result struct {
 // untouched (StatusClean); otherwise the pristine original is preserved to
 // "<path>.orig" (never overwritten) and fsynced before the expanded body is
 // atomically written over path.
-func NormalizeFile(path string) (Result, error) {
+//
+// report, if non-nil, is invoked once with the backup path after the .orig is
+// durably written but BEFORE the .lrc is replaced, so a failure to record the
+// undo trail aborts the rewrite (the file is left untouched and the just-created
+// backup rolled back) rather than leaving a rewritten file absent from the trail.
+func NormalizeFile(path string, report func(backupPath string) error) (Result, error) {
 	raw, origMode, skip, err := load(path)
 	if err != nil {
 		return Result{}, err
@@ -148,17 +163,30 @@ func NormalizeFile(path string) (Result, error) {
 		return Result{}, fmt.Errorf("stat backup %s: %w", backupPath, statErr)
 	}
 
-	// Backup-first: preserve the pristine original before touching the .lrc.
+	dir := filepath.Dir(path)
+	// Backup-first: preserve the pristine original before touching the .lrc, then
+	// fsync the directory so the .orig's entry is durable BEFORE the rename that
+	// replaces the .lrc (a crash must never leave the rewrite without its backup).
 	if err := writeBackup(backupPath, raw, origMode); err != nil {
 		return Result{}, err
 	}
-	// Atomic rewrite of the expanded body.
+	lyrics.FsyncDir(dir)
+
+	// Record the undo trail while the backup exists but before the rewrite. If
+	// recording fails, roll the backup back and abort so the .lrc is untouched
+	// and no rewritten file is ever missing from the trail.
+	if report != nil {
+		if rerr := report(backupPath); rerr != nil {
+			_ = os.Remove(backupPath)
+			return Result{}, fmt.Errorf("record backup for %s: %w", path, rerr)
+		}
+	}
+
+	// Atomic rewrite of the expanded body, then fsync the rename durable.
 	if err := atomicWrite(path, []byte(out), origMode); err != nil {
 		return Result{}, err
 	}
-	// One parent-dir fsync makes both new directory entries (.orig and the
-	// renamed .lrc) crash-durable.
-	lyrics.FsyncDir(filepath.Dir(path))
+	lyrics.FsyncDir(dir)
 	return Result{Status: StatusNormalized, Backup: backupPath}, nil
 }
 
@@ -205,7 +233,15 @@ func writeBackup(backupPath string, content []byte, mode os.FileMode) error {
 	if err != nil {
 		return fmt.Errorf("create backup %s: %w", backupPath, err)
 	}
-	defer func() { _ = f.Close() }()
+	// Remove a partially-written backup on any failure, so a later run does not
+	// mistake a truncated/incomplete .orig for a valid one and skip the source.
+	committed := false
+	defer func() {
+		_ = f.Close()
+		if !committed {
+			_ = os.Remove(backupPath)
+		}
+	}()
 	if _, err := f.Write(content); err != nil {
 		return fmt.Errorf("write backup %s: %w", backupPath, err)
 	}
@@ -215,6 +251,7 @@ func writeBackup(backupPath string, content []byte, mode os.FileMode) error {
 	if err := os.Chmod(backupPath, mode); err != nil { //nolint:gosec // mode copied from the original file
 		return fmt.Errorf("chmod backup %s: %w", backupPath, err)
 	}
+	committed = true
 	return nil
 }
 

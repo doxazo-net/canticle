@@ -102,6 +102,11 @@ func runReconcileLRC(ctx context.Context, out io.Writer, args ScanReconcileLRCCm
 	if lb != nil && lb.opened() {
 		_, _ = fmt.Fprintf(out, "backup records written to %s\n", backupPath)
 	}
+	if summary.Errors > 0 {
+		// A partial reconciliation is not success: some files failed and were
+		// left untouched, so callers/scripts must see a non-zero exit.
+		return 1
+	}
 	return 0
 }
 
@@ -124,6 +129,15 @@ func (l *lazyBackup) Write(p []byte) (int, error) {
 }
 
 func (l *lazyBackup) opened() bool { return l.f != nil }
+
+// Sync flushes the backup file so writeBackupRecord can make each record durable
+// before the .lrc it protects is rewritten.
+func (l *lazyBackup) Sync() error {
+	if l.f != nil {
+		return l.f.Sync()
+	}
+	return nil
+}
 
 func (l *lazyBackup) Close() error {
 	if l.f != nil {
