@@ -198,3 +198,61 @@ func readFile(t *testing.T, path string) string {
 	}
 	return string(b)
 }
+
+// TestRunReconcileLRC_ReportsBlockedWithPointerToPaths pins the operator-facing
+// half of #487. A blocked file is the ONLY tally that demands follow-up, and the
+// count alone is useless -- the paths live in the WARN lines. So the summary must
+// carry a distinct blocked count (not folded into skipped, or a zero blocked
+// count would not be a real all-clear) and, when non-zero, point at where the
+// paths are.
+func TestRunReconcileLRC_ReportsBlockedWithPointerToPaths(t *testing.T) {
+	cfgPath, root := setupReconcileLRC(t)
+	blocked := filepath.Join(root, "blocked.lrc")
+
+	// Still stacked, with a pre-existing .orig barring a verifiable rewrite.
+	mustWrite(t, blocked, "[00:39.26][00:47.06]Chorus\n")
+	mustWrite(t, blocked+".orig", "operator's own backup\n")
+
+	var buf bytes.Buffer
+	// rc=1 deliberately (#487): a blocked file is still stacked and was left
+	// untouched, so a script must not read the run as an all-clear while the WARN
+	// tells a human that action is required.
+	if rc := runReconcileLRC(context.Background(), &buf, ScanReconcileLRCCmd{ConfigPath: cfgPath, Yes: true}); rc != 1 {
+		t.Fatalf("rc=%d; want 1 when a file is blocked. out=%s", rc, buf.String())
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, "1 blocked") {
+		t.Errorf("summary must carry a distinct blocked count; got:\n%s", out)
+	}
+	if !strings.Contains(out, "see the BLOCKED warnings above for paths") {
+		t.Errorf("a non-zero blocked count must point at the paths; got:\n%s", out)
+	}
+	// The operator's backup is theirs: a blocked file must never be rewritten and
+	// the .orig must survive untouched.
+	if got := readFile(t, blocked+".orig"); !strings.Contains(got, "operator's own backup") {
+		t.Errorf(".orig was clobbered; it is the operator's file: %q", got)
+	}
+	if got := readFile(t, blocked); !strings.Contains(got, "][") {
+		t.Error("blocked file was rewritten despite the .orig barring it")
+	}
+}
+
+// A clean run must not emit the follow-up line: it fires only when there is
+// something to follow up on.
+func TestRunReconcileLRC_NoBlockedPointerWhenNoneBlocked(t *testing.T) {
+	cfgPath, root := setupReconcileLRC(t)
+	mustWrite(t, filepath.Join(root, "stacked.lrc"), "[00:39.26][00:47.06]Chorus\n")
+
+	var buf bytes.Buffer
+	if rc := runReconcileLRC(context.Background(), &buf, ScanReconcileLRCCmd{ConfigPath: cfgPath, Yes: true}); rc != 0 {
+		t.Fatalf("rc=%d out=%s", rc, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "0 blocked") {
+		t.Errorf("summary should report a zero blocked count as a real all-clear; got:\n%s", out)
+	}
+	if strings.Contains(out, "see the BLOCKED warnings above") {
+		t.Errorf("the follow-up pointer must not fire when nothing is blocked; got:\n%s", out)
+	}
+}
