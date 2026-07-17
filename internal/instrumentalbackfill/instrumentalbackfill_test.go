@@ -24,11 +24,15 @@ type fakeStore struct {
 	stampErr error
 
 	settleErr error
-	// settleClaimed makes SettleInstrumental report settled=false, simulating a
-	// serve-mode worker claiming the row while the detector ran.
-	settleClaimed bool
+	// settleOutcome is what SettleInstrumental reports. Defaults to queue.Settled;
+	// set it to SettleClaimed / SettleAlreadyInstrumental / SettleRowGone to stage
+	// the races those outcomes represent.
+	settleOutcome queue.SettleOutcome
 	// stampClaimed makes StampUnclassifiedMiss report stamped=false.
 	stampClaimed bool
+	// order, when set, records the mutation sequence so a test can assert ORDERING
+	// rather than mere callback execution.
+	order *[]string
 
 	lastOpts    queue.ListUnclassifiedOptions
 	stamped     map[int64]int
@@ -39,13 +43,14 @@ type fakeStore struct {
 
 func newFakeStore(items ...queue.WorkItem) *fakeStore {
 	return &fakeStore{
-		items:   items,
-		total:   len(items),
-		stamped: map[int64]int{},
+		items:         items,
+		total:         len(items),
+		stamped:       map[int64]int{},
+		settleOutcome: queue.Settled,
 	}
 }
 
-func (s *fakeStore) CountUnclassified(_ context.Context, _ *int64) (int, error) {
+func (s *fakeStore) CountUnclassified(_ context.Context, _ *int64, _ bool) (int, error) {
 	return s.total, s.countErr
 }
 
@@ -61,17 +66,20 @@ func (s *fakeStore) ListUnclassified(_ context.Context, opts queue.ListUnclassif
 	return items, nil
 }
 
-func (s *fakeStore) SettleInstrumental(_ context.Context, id int64, _ queue.InstrumentalTelemetry) (bool, error) {
+func (s *fakeStore) SettleInstrumental(_ context.Context, id int64, _ queue.InstrumentalTelemetry) (queue.SettleOutcome, error) {
 	s.settleCalls++
-	if s.settleErr != nil {
-		return false, s.settleErr
+	if s.order != nil {
+		*s.order = append(*s.order, "settle")
 	}
-	if s.settleClaimed {
-		return false, nil
+	if s.settleErr != nil {
+		return queue.SettleFailed, s.settleErr
+	}
+	if s.settleOutcome != queue.Settled {
+		return s.settleOutcome, nil
 	}
 	s.stamped[id] = 1
 	s.settled = append(s.settled, id)
-	return true, nil
+	return queue.Settled, nil
 }
 
 func (s *fakeStore) StampUnclassifiedMiss(_ context.Context, id int64, _ queue.InstrumentalTelemetry) (bool, error) {
@@ -107,6 +115,8 @@ func (d fakeDetector) Detect(_ context.Context, _ string) (detector.Result, erro
 type fakeWriter struct {
 	err     error
 	written []string
+	// order, when set, records "marker" so a test can assert the real sequence.
+	order *[]string
 }
 
 func (w *fakeWriter) WriteLRC(song models.Song, filename, outdir string) error {
@@ -118,6 +128,9 @@ func (w *fakeWriter) WriteLRC(song models.Song, filename, outdir string) error {
 		return err
 	}
 	w.written = append(w.written, filepath.Join(outdir, name))
+	if w.order != nil {
+		*w.order = append(*w.order, "marker")
+	}
 	return nil
 }
 
@@ -137,9 +150,10 @@ func instrumentalVerdict() detector.Result {
 // --- tests ---------------------------------------------------------------
 
 func TestRun_SettlesInstrumentalRowBackupFirst(t *testing.T) {
-	store := newFakeStore(item(1, "/music/a.flac"))
-	w := &fakeWriter{}
 	var order []string
+	store := newFakeStore(item(1, "/music/a.flac"))
+	store.order = &order
+	w := &fakeWriter{order: &order}
 
 	res, err := New(store, fakeDetector{res: instrumentalVerdict()}, w).Run(context.Background(), Options{
 		GlobalDetectDefault: true,
@@ -157,8 +171,18 @@ func TestRun_SettlesInstrumentalRowBackupFirst(t *testing.T) {
 	if store.stamped[1] != 1 {
 		t.Errorf("stamped = %v; want 1", store.stamped[1])
 	}
-	if len(order) != 1 || order[0] != "backup" {
-		t.Errorf("backup did not run: %v", order)
+
+	// Assert the ACTUAL sequence, not merely that the backup ran. An earlier
+	// version only recorded "backup", so it passed even if the report fired last --
+	// which is precisely the ordering the backup-first contract exists to forbid.
+	want := []string{"backup", "marker", "settle"}
+	if len(order) != len(want) {
+		t.Fatalf("order = %v; want %v", order, want)
+	}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("order = %v; want %v (the restorable record must exist before the change it describes)", order, want)
+		}
 	}
 }
 
@@ -418,7 +442,7 @@ func TestMarkerPaths_NamesTheFileTheWriterActuallyWrites(t *testing.T) {
 	claimed := MarkerPaths(it.Inputs)
 
 	w := &fakeWriter{}
-	if err := (&Backfiller{w: w}).writeMarkers(it, &Result{}); err != nil {
+	if _, err := (&Backfiller{w: w}).writeMarkers(it); err != nil {
 		t.Fatalf("writeMarkers: %v", err)
 	}
 
@@ -450,7 +474,7 @@ func TestRun_WorkerClaimedRowLeavesNoOrphanMarker(t *testing.T) {
 		SourcePath: "/music/a.flac",
 	}}
 	store := newFakeStore(it)
-	store.settleClaimed = true // a worker took the row mid-classification
+	store.settleOutcome = queue.SettleClaimed // a worker took the row mid-classification
 
 	// A real writer, so a real file lands on disk and must really be removed.
 	res, err := New(store, fakeDetector{res: instrumentalVerdict()}, lyrics.NewLRCWriter()).Run(
@@ -472,5 +496,149 @@ func TestRun_WorkerClaimedRowLeavesNoOrphanMarker(t *testing.T) {
 	}
 	if res.MarkersWritten != 0 {
 		t.Errorf("MarkersWritten = %d; want 0 after the marker was taken back", res.MarkersWritten)
+	}
+}
+
+// TestRun_PeerSettledRowKeepsItsMarker is the data-loss guard. Zero affected rows
+// only proves the row is no longer deferred -- it does NOT prove a worker took it.
+// A PEER BACKFILL may have settled it first with the identical verdict, in which
+// case the marker on disk is correct and deleting it would destroy a valid result
+// over a race we lost harmlessly.
+func TestRun_PeerSettledRowKeepsItsMarker(t *testing.T) {
+	dir := t.TempDir()
+	it := queue.WorkItem{ID: 1, Inputs: models.Inputs{
+		Track:      models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Outdir:     dir,
+		Filename:   "song.lrc",
+		SourcePath: "/music/a.flac",
+	}}
+	store := newFakeStore(it)
+	store.settleOutcome = queue.SettleAlreadyInstrumental // a peer got there first
+
+	res, err := New(store, fakeDetector{res: instrumentalVerdict()}, lyrics.NewLRCWriter()).Run(
+		context.Background(), Options{GlobalDetectDefault: true, Report: func(Change) error { return nil }})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if res.SkippedAlreadySettled != 1 {
+		t.Errorf("res = %+v; want SkippedAlreadySettled=1", res)
+	}
+	for _, p := range MarkerPaths(it.Inputs) {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("peer-settled marker was DELETED at %s: the peer's result is valid and this run must not destroy it (%v)", p, err)
+		}
+	}
+	if res.MarkersWritten != 1 {
+		t.Errorf("MarkersWritten = %d; want 1 (the marker stands, it is simply the peer's)", res.MarkersWritten)
+	}
+}
+
+// A settle ERROR is ambiguous -- the failure may have come from Commit itself, so
+// the row may or may not be settled. Deleting the marker could destroy a committed
+// result, so it must survive; an orphan is recoverable, a deleted valid marker is
+// not.
+func TestRun_AmbiguousSettleErrorKeepsMarker(t *testing.T) {
+	dir := t.TempDir()
+	it := queue.WorkItem{ID: 1, Inputs: models.Inputs{
+		Track:      models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Outdir:     dir,
+		Filename:   "song.lrc",
+		SourcePath: "/music/a.flac",
+	}}
+	store := newFakeStore(it)
+	store.settleErr = errors.New("commit failed: outcome unknown")
+
+	res, err := New(store, fakeDetector{res: instrumentalVerdict()}, lyrics.NewLRCWriter()).Run(
+		context.Background(), Options{GlobalDetectDefault: true, Report: func(Change) error { return nil }})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Errors != 1 || res.RowsSettled != 0 {
+		t.Errorf("res = %+v; want errors=1 settled=0", res)
+	}
+	for _, p := range MarkerPaths(it.Inputs) {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("marker deleted on an AMBIGUOUS settle error at %s; the commit may have landed (%v)", p, err)
+		}
+	}
+}
+
+// Verdict counts are a separate axis from mutation outcomes: a worker claim does
+// not change what the detector heard. Instrumental + NotInstrumental must always
+// equal Checked, or the summary underreports.
+func TestRun_VerdictCountsSurviveAWorkerClaim(t *testing.T) {
+	dir := t.TempDir()
+	it := queue.WorkItem{ID: 1, Inputs: models.Inputs{
+		Track:      models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Outdir:     dir,
+		Filename:   "song.lrc",
+		SourcePath: "/music/a.flac",
+	}}
+	store := newFakeStore(it)
+	store.settleOutcome = queue.SettleClaimed
+
+	res, err := New(store, fakeDetector{res: instrumentalVerdict()}, lyrics.NewLRCWriter()).Run(
+		context.Background(), Options{GlobalDetectDefault: true, Report: func(Change) error { return nil }})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Checked != res.Instrumental+res.NotInstrumental {
+		t.Errorf("res = %+v; Checked must always equal Instrumental+NotInstrumental -- the detector's verdict stands regardless of what happened to the row", res)
+	}
+	if res.Instrumental != 1 {
+		t.Errorf("Instrumental = %d; want 1 (the detector said instrumental; the claim did not change that)", res.Instrumental)
+	}
+	if res.SkippedClaimed != 1 || res.RowsSettled != 0 {
+		t.Errorf("res = %+v; want claimed=1 settled=0", res)
+	}
+}
+
+// A negative verdict is a mutation too -- it stamps instrumental_result=0, which
+// retires the row from every future backfill. It must be backed up first.
+func TestRun_NegativeVerdictIsBackedUpBeforeStamping(t *testing.T) {
+	store := newFakeStore(item(1, "/music/a.flac"))
+	var order []string
+	store.order = &order
+
+	res, err := New(store, fakeDetector{res: detector.Result{Instrumental: false, Version: "v1"}}, &fakeWriter{}).Run(
+		context.Background(), Options{
+			GlobalDetectDefault: true,
+			Report: func(ch Change) error {
+				if ch.Instrumental {
+					t.Error("Change.Instrumental = true for a negative verdict")
+				}
+				order = append(order, "backup")
+				return nil
+			},
+		})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.RowsStamped != 1 {
+		t.Errorf("res = %+v; want RowsStamped=1", res)
+	}
+	if len(order) == 0 || order[0] != "backup" {
+		t.Fatalf("order = %v; a negative stamp retires the row from future backfills and must be recorded BEFORE it lands", order)
+	}
+}
+
+// A Report failure on the negative path must abort the stamp: no record, no change.
+func TestRun_NegativeVerdictReportFailureAbortsStamp(t *testing.T) {
+	store := newFakeStore(item(1, "/music/a.flac"))
+
+	res, err := New(store, fakeDetector{res: detector.Result{Instrumental: false, Version: "v1"}}, &fakeWriter{}).Run(
+		context.Background(), Options{
+			GlobalDetectDefault: true,
+			Report:              func(Change) error { return errors.New("disk full") },
+		})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Errors != 1 || res.RowsStamped != 0 {
+		t.Fatalf("res = %+v; want errors=1 stamped=0", res)
+	}
+	if store.stampCalls != 0 {
+		t.Errorf("stamped despite a failed backup (%d calls)", store.stampCalls)
 	}
 }

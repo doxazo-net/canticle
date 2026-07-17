@@ -3704,7 +3704,7 @@ func TestDBQueue_ListUnclassifiedFindsNeverScoredDeferredRows(t *testing.T) {
 		t.Fatalf("defer no-source: %v", err)
 	}
 
-	got, err := q.ListUnclassified(ctx, ListUnclassifiedOptions{})
+	got, err := q.ListUnclassified(ctx, ListUnclassifiedOptions{GlobalDetectDefault: true})
 	if err != nil {
 		t.Fatalf("ListUnclassified: %v", err)
 	}
@@ -3749,12 +3749,12 @@ func TestDBQueue_InstrumentalWritesRefuseRowOwnedByWorker(t *testing.T) {
 		t.Fatalf("dequeue: %v", err)
 	}
 
-	settled, err := q.SettleInstrumental(ctx, item.ID, tel)
+	outcome, err := q.SettleInstrumental(ctx, item.ID, tel)
 	if err != nil {
 		t.Fatalf("SettleInstrumental: %v", err)
 	}
-	if settled {
-		t.Error("SettleInstrumental settled a row owned by a worker; the deferred guard must refuse it")
+	if outcome != SettleClaimed {
+		t.Errorf("outcome = %v; want SettleClaimed (a worker owns the row)", outcome)
 	}
 	stamped, err := q.StampUnclassifiedMiss(ctx, item.ID, tel)
 	if err != nil {
@@ -3767,10 +3767,10 @@ func TestDBQueue_InstrumentalWritesRefuseRowOwnedByWorker(t *testing.T) {
 	// Nothing may have landed: not the status, and not the verdict.
 	var status string
 	var result *int
-	var outcome *string
+	var outcomeType *string
 	if err := q.db.QueryRowContext(ctx,
 		`SELECT status, instrumental_result, outcome_type FROM work_queue WHERE id = ?`, item.ID,
-	).Scan(&status, &result, &outcome); err != nil {
+	).Scan(&status, &result, &outcomeType); err != nil {
 		t.Fatalf("read row: %v", err)
 	}
 	if status != "processing" {
@@ -3779,8 +3779,8 @@ func TestDBQueue_InstrumentalWritesRefuseRowOwnedByWorker(t *testing.T) {
 	if result != nil {
 		t.Errorf("instrumental_result = %v; want NULL -- a refused write must write nothing at all", *result)
 	}
-	if outcome != nil {
-		t.Errorf("outcome_type = %v; want NULL -- a refused write must write nothing at all", *outcome)
+	if outcomeType != nil {
+		t.Errorf("outcome_type = %v; want NULL -- a refused write must write nothing at all", *outcomeType)
 	}
 
 	// Complete still works for the worker that owns it.
@@ -3812,25 +3812,25 @@ func TestDBQueue_SettleInstrumentalCompletesDeferredRowAtomically(t *testing.T) 
 		t.Fatalf("defer: %v", err)
 	}
 
-	settled, err := q.SettleInstrumental(ctx, item.ID, tel)
+	outcome, err := q.SettleInstrumental(ctx, item.ID, tel)
 	if err != nil {
 		t.Fatalf("SettleInstrumental: %v", err)
 	}
-	if !settled {
-		t.Fatal("SettleInstrumental reported not-settled for a deferred row")
+	if outcome != Settled {
+		t.Fatalf("outcome = %v; want Settled for a deferred row", outcome)
 	}
 
 	var status string
 	var result int
-	var outcome string
+	var outcomeType string
 	var vocalClass string
 	if err := q.db.QueryRowContext(ctx,
 		`SELECT status, instrumental_result, outcome_type, vocal_class FROM work_queue WHERE id = ?`, item.ID,
-	).Scan(&status, &result, &outcome, &vocalClass); err != nil {
+	).Scan(&status, &result, &outcomeType, &vocalClass); err != nil {
 		t.Fatalf("read row: %v", err)
 	}
-	if status != "done" || result != 1 || outcome != "instrumental" {
-		t.Errorf("row = (status %q, result %d, outcome %q); want (done, 1, instrumental)", status, result, outcome)
+	if status != "done" || result != 1 || outcomeType != "instrumental" {
+		t.Errorf("row = (status %q, result %d, outcome %q); want (done, 1, instrumental)", status, result, outcomeType)
 	}
 	if vocalClass != "Singing" {
 		t.Errorf("vocal_class = %q; want the telemetry written in the same transaction", vocalClass)
@@ -3870,7 +3870,7 @@ func TestDBQueue_ListUnclassifiedScopesToLibrary(t *testing.T) {
 	inA := mk("in-lib-a", "/libA/a.mp3", srA)
 	_ = mk("in-lib-b", "/libB/b.mp3", srB)
 
-	got, err := q.ListUnclassified(ctx, ListUnclassifiedOptions{LibraryID: &libA})
+	got, err := q.ListUnclassified(ctx, ListUnclassifiedOptions{LibraryID: &libA, GlobalDetectDefault: true})
 	if err != nil {
 		t.Fatalf("ListUnclassified: %v", err)
 	}
@@ -3882,7 +3882,7 @@ func TestDBQueue_ListUnclassifiedScopesToLibrary(t *testing.T) {
 		t.Fatalf("scoped list = %v; want only the libA row %d", ids, inA)
 	}
 
-	n, err := q.CountUnclassified(ctx, &libA)
+	n, err := q.CountUnclassified(ctx, &libA, true)
 	if err != nil {
 		t.Fatalf("CountUnclassified: %v", err)
 	}
@@ -3891,7 +3891,7 @@ func TestDBQueue_ListUnclassifiedScopesToLibrary(t *testing.T) {
 	}
 
 	// Unscoped sees both, so the filter above is doing real work.
-	all, err := q.CountUnclassified(ctx, nil)
+	all, err := q.CountUnclassified(ctx, nil, true)
 	if err != nil {
 		t.Fatalf("CountUnclassified unscoped: %v", err)
 	}
@@ -3910,13 +3910,191 @@ func TestDBQueue_UnclassifiedQueriesPropagateDBFailure(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	if _, err := q.ListUnclassified(ctx, ListUnclassifiedOptions{}); err == nil {
+	if _, err := q.ListUnclassified(ctx, ListUnclassifiedOptions{GlobalDetectDefault: true}); err == nil {
 		t.Error("ListUnclassified returned nil error on a closed database; an empty backlog and a dead database must not look alike")
 	}
-	if _, err := q.CountUnclassified(ctx, nil); err == nil {
+	if _, err := q.CountUnclassified(ctx, nil, true); err == nil {
 		t.Error("CountUnclassified returned nil error on a closed database")
 	}
 	if _, err := q.SettleInstrumental(ctx, 1, InstrumentalTelemetry{}); err == nil {
 		t.Error("SettleInstrumental returned nil error on a closed database")
+	}
+}
+
+// TestDBQueue_SettleInstrumentalDistinguishesPeerFromWorker is the data-loss
+// guard at the DB layer. Zero affected rows only proves the row is not deferred.
+// A worker claim and a peer backfill's settle both produce zero rows, but demand
+// OPPOSITE actions: the caller must remove its orphaned marker in the first case
+// and preserve the valid one in the second. A bool cannot carry that.
+func TestDBQueue_SettleInstrumentalDistinguishesPeerFromWorker(t *testing.T) {
+	ctx := context.Background()
+	tel := InstrumentalTelemetry{MusicSum: 0.95, DetectorVersion: "v1"}
+
+	mkDeferred := func(t *testing.T, q *DBQueue, title string) int64 {
+		t.Helper()
+		item, err := q.Enqueue(ctx, models.Inputs{
+			Track:      models.Track{ArtistName: "Artist", TrackName: title},
+			Outdir:     "out",
+			Filename:   title + ".lrc",
+			SourcePath: "/music/" + title + ".flac",
+		}, 1)
+		if err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+		if _, err := q.Dequeue(ctx); err != nil {
+			t.Fatalf("dequeue: %v", err)
+		}
+		// Zero cooldown: next_attempt_at = now, so the row is immediately
+		// dequeue-eligible and a worker can genuinely race it -- which is the whole
+		// point of the guard under test.
+		if _, err := q.Defer(ctx, item.ID, 0, errors.New("no results found")); err != nil {
+			t.Fatalf("defer: %v", err)
+		}
+		return item.ID
+	}
+
+	t.Run("peer backfill settled it first", func(t *testing.T) {
+		q := NewDBQueue(openQueueTestDB(t))
+		id := mkDeferred(t, q, "peer")
+		// The peer wins the race.
+		if out, err := q.SettleInstrumental(ctx, id, tel); err != nil || out != Settled {
+			t.Fatalf("peer settle = (%v, %v); want (Settled, nil)", out, err)
+		}
+		// We lose it, and must be told WHY -- our marker is identical and valid.
+		out, err := q.SettleInstrumental(ctx, id, tel)
+		if err != nil {
+			t.Fatalf("second settle: %v", err)
+		}
+		if out != SettleAlreadyInstrumental {
+			t.Fatalf("outcome = %v; want SettleAlreadyInstrumental. Reporting a worker claim here makes the caller DELETE the marker the peer just validly established", out)
+		}
+	})
+
+	t.Run("worker claimed it", func(t *testing.T) {
+		q := NewDBQueue(openQueueTestDB(t))
+		id := mkDeferred(t, q, "worker")
+		if _, err := q.Dequeue(ctx); err != nil { // a worker takes it back
+			t.Fatalf("dequeue: %v", err)
+		}
+		out, err := q.SettleInstrumental(ctx, id, tel)
+		if err != nil {
+			t.Fatalf("settle: %v", err)
+		}
+		if out != SettleClaimed {
+			t.Fatalf("outcome = %v; want SettleClaimed", out)
+		}
+	})
+
+	t.Run("row gone", func(t *testing.T) {
+		q := NewDBQueue(openQueueTestDB(t))
+		id := mkDeferred(t, q, "gone")
+		if _, err := q.db.ExecContext(ctx, `DELETE FROM work_queue WHERE id = ?`, id); err != nil {
+			t.Fatalf("delete: %v", err)
+		}
+		out, err := q.SettleInstrumental(ctx, id, tel)
+		if err != nil {
+			t.Fatalf("settle: %v", err)
+		}
+		if out != SettleRowGone {
+			t.Fatalf("outcome = %v; want SettleRowGone", out)
+		}
+	})
+}
+
+// TestDBQueue_ListUnclassifiedAppliesEligibilityBeforeLimit is the starvation
+// guard. Limit is applied by the database, so filtering ineligible rows in Go
+// after the fact means they have already consumed the slots. The ordering is
+// deterministic, so the SAME ineligible rows would fill every capped run and the
+// eligible rows behind them would never be classified -- ever.
+func TestDBQueue_ListUnclassifiedAppliesEligibilityBeforeLimit(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+
+	mk := func(title string, detect *bool) int64 {
+		inputs := models.Inputs{
+			Track:              models.Track{ArtistName: "Artist", TrackName: title},
+			Outdir:             "out",
+			Filename:           title + ".lrc",
+			SourcePath:         "/music/" + title + ".flac",
+			DetectInstrumental: detect,
+		}
+		item, err := q.Enqueue(ctx, inputs, 1)
+		if err != nil {
+			t.Fatalf("enqueue %s: %v", title, err)
+		}
+		if _, err := q.Dequeue(ctx); err != nil {
+			t.Fatalf("dequeue %s: %v", title, err)
+		}
+		if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
+			t.Fatalf("defer %s: %v", title, err)
+		}
+		return item.ID
+	}
+
+	off, on := false, true
+	// Two opted-out rows are created FIRST, so the deterministic ordering
+	// (created_at ASC) puts them ahead of the eligible one.
+	mk("optout-a", &off)
+	mk("optout-b", &off)
+	eligible := mk("eligible", &on)
+
+	got, err := q.ListUnclassified(ctx, ListUnclassifiedOptions{Limit: 2, GlobalDetectDefault: true})
+	if err != nil {
+		t.Fatalf("ListUnclassified: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != eligible {
+		var ids []int64
+		for _, it := range got {
+			ids = append(ids, it.ID)
+		}
+		t.Fatalf("--limit=2 returned %v; want only the eligible row [%d]. Opted-out rows consuming the limit would starve it forever, since the ordering never changes", ids, eligible)
+	}
+
+	// The total must use the same rule, or "N left unexamined" is a lie.
+	n, err := q.CountUnclassified(ctx, nil, true)
+	if err != nil {
+		t.Fatalf("CountUnclassified: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("CountUnclassified = %d; want 1 (only eligible rows are really in the backlog)", n)
+	}
+}
+
+// A NULL per-item stamp defers to the global default -- including when that
+// default is OFF, in which case nothing is eligible.
+func TestDBQueue_ListUnclassifiedRespectsGlobalDefaultForNullStamps(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+
+	item, err := q.Enqueue(ctx, models.Inputs{
+		Track:      models.Track{ArtistName: "Artist", TrackName: "null-stamp"},
+		Outdir:     "out",
+		Filename:   "a.lrc",
+		SourcePath: "/music/a.flac",
+	}, 1) // DetectInstrumental nil -> NULL
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if _, err := q.Dequeue(ctx); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+
+	on, err := q.ListUnclassified(ctx, ListUnclassifiedOptions{GlobalDetectDefault: true})
+	if err != nil {
+		t.Fatalf("ListUnclassified(on): %v", err)
+	}
+	if len(on) != 1 {
+		t.Errorf("global default on: got %d rows; want 1 (a NULL stamp defers to the default)", len(on))
+	}
+
+	off, err := q.ListUnclassified(ctx, ListUnclassifiedOptions{GlobalDetectDefault: false})
+	if err != nil {
+		t.Fatalf("ListUnclassified(off): %v", err)
+	}
+	if len(off) != 0 {
+		t.Errorf("global default off: got %d rows; want 0 (a NULL stamp is ineligible when the default is off)", len(off))
 	}
 }

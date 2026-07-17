@@ -139,8 +139,14 @@ func TestRunReconcileInstrumental_WritesMarkerForNeverScoredRow(t *testing.T) {
 
 // TestRunReconcileInstrumental_HonorsPerItemOptOut: a row whose enqueue-time
 // decision explicitly disabled detection must stay untouched. This command is a
-// backfill for rows nobody ever looked at, not a license to override a decision
-// the operator already made.
+// backfill for rows nobody ever looked at, not an override of a decision the
+// operator already made.
+//
+// The opt-out is applied in SQL, so such a row is not merely skipped after
+// selection -- it is never a candidate. That matters beyond tidiness: --limit is
+// applied by the database, so a row filtered afterwards in Go would already have
+// consumed a slot, and the deterministic ordering would let opted-out rows fill
+// every capped run forever (#508 review).
 func TestRunReconcileInstrumental_HonorsPerItemOptOut(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -193,8 +199,13 @@ func TestRunReconcileInstrumental_HonorsPerItemOptOut(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(outdir, "song.txt")); !os.IsNotExist(err) {
 		t.Errorf("opted-out row must not get a marker; stat err=%v", err)
 	}
-	if !strings.Contains(buf.String(), "detect-off=1") {
-		t.Errorf("output should report the opt-out skip:\n%s", buf.String())
+	// Excluded from the backlog entirely, not counted and then skipped: a total
+	// that included rows the run can never classify would overstate the work.
+	if !strings.Contains(buf.String(), "0 never-classified deferred row(s) total") {
+		t.Errorf("an opted-out row must not count toward the backlog total:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "checked=0") {
+		t.Errorf("an opted-out row must never reach the detector:\n%s", buf.String())
 	}
 }
 

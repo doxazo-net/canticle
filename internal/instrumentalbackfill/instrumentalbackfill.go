@@ -17,6 +17,7 @@ package instrumentalbackfill
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,9 +36,9 @@ import (
 // detector runs, and a serve-mode worker can claim one mid-classification. A
 // false return means a worker took the row and nothing was written.
 type Store interface {
-	CountUnclassified(ctx context.Context, libraryID *int64) (int, error)
+	CountUnclassified(ctx context.Context, libraryID *int64, globalDetectDefault bool) (int, error)
 	ListUnclassified(ctx context.Context, opts queue.ListUnclassifiedOptions) ([]queue.WorkItem, error)
-	SettleInstrumental(ctx context.Context, id int64, tel queue.InstrumentalTelemetry) (bool, error)
+	SettleInstrumental(ctx context.Context, id int64, tel queue.InstrumentalTelemetry) (queue.SettleOutcome, error)
 	StampUnclassifiedMiss(ctx context.Context, id int64, tel queue.InstrumentalTelemetry) (bool, error)
 }
 
@@ -62,27 +63,42 @@ type Writer interface {
 // to Options.Report (the durable backup record) and Options.Preview (the dry-run
 // line), so both describe exactly the same thing.
 type Change struct {
-	QueueID     int64
-	Artist      string
-	Title       string
-	SourcePath  string
+	QueueID    int64
+	Artist     string
+	Title      string
+	SourcePath string
+	// Instrumental is the detector's verdict, and therefore which mutation this
+	// change records: true settles the row and writes a marker, false stamps
+	// instrumental_result=0 and leaves it deferred. Both are backed up, because
+	// both remove the row from future backfills.
+	Instrumental bool
+	// MarkerPaths are the sidecars a positive change writes, empty for a negative
+	// one. Derived via lyrics.SidecarName, never the raw enqueued filename.
 	MarkerPaths []string
 	Telemetry   queue.InstrumentalTelemetry
 }
 
 // Result counts one Run.
+//
+// The verdict counts and the mutation counts are deliberately separate axes.
+// Instrumental + NotInstrumental == Checked ALWAYS: they record what the detector
+// heard, and no mutation outcome revises that. What happened to the row afterwards
+// is RowsSettled / RowsStamped / SkippedClaimed / SkippedAlreadySettled / Errors.
 type Result struct {
-	Total            int // rows in the backlog, before Limit
-	Candidates       int // rows this run considered (Total capped by Limit)
-	Checked          int // rows the detector actually classified
-	Instrumental     int // detector agreed
-	NotInstrumental  int // detector disagreed
-	MarkersWritten   int // marker sidecars written
-	RowsSettled      int // rows moved to done
-	SkippedDetectOff int // rows whose detect decision was off
-	SkippedNoSource  int // rows with no readable source path
-	SkippedClaimed   int // rows a serve-mode worker claimed mid-classification
-	Errors           int // non-fatal per-row failures
+	Total           int // eligible rows in the backlog, before Limit
+	Candidates      int // rows this run considered (Total capped by Limit)
+	Checked         int // rows the detector actually classified
+	Instrumental    int // detector agreed  (verdict axis)
+	NotInstrumental int // detector disagreed (verdict axis)
+
+	MarkersWritten        int // marker sidecars written and still on disk
+	RowsSettled           int // rows settled instrumental and completed
+	RowsStamped           int // rows stamped not-instrumental, left deferred
+	SkippedDetectOff      int // rows whose detect decision was off
+	SkippedNoSource       int // rows with no readable source path
+	SkippedClaimed        int // rows a serve-mode worker claimed mid-classification
+	SkippedAlreadySettled int // rows a PEER BACKFILL settled first (marker preserved)
+	Errors                int // non-fatal per-row failures
 }
 
 // Options controls a Run.
@@ -125,15 +141,18 @@ func New(store Store, det Detector, w Writer) *Backfiller {
 func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 	var res Result
 
-	total, err := b.store.CountUnclassified(ctx, opts.LibraryID)
+	total, err := b.store.CountUnclassified(ctx, opts.LibraryID, opts.GlobalDetectDefault)
 	if err != nil {
 		return res, fmt.Errorf("instrumentalbackfill: count unclassified: %w", err)
 	}
 	res.Total = total
 
+	// Eligibility is resolved in SQL so ineligible rows never consume Limit; the
+	// per-item check below is the belt-and-braces half of the same rule.
 	candidates, err := b.store.ListUnclassified(ctx, queue.ListUnclassifiedOptions{
-		LibraryID: opts.LibraryID,
-		Limit:     opts.Limit,
+		LibraryID:           opts.LibraryID,
+		Limit:               opts.Limit,
+		GlobalDetectDefault: opts.GlobalDetectDefault,
 	})
 	if err != nil {
 		return res, fmt.Errorf("instrumentalbackfill: list unclassified: %w", err)
@@ -179,14 +198,38 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 			DetectorVersion: verdict.Version,
 		}
 
+		// Instrumental / NotInstrumental are DETECTOR-VERDICT counts and are never
+		// walked back by a mutation outcome: a worker claim does not change what the
+		// detector heard. They must always sum to Checked. The mutation outcome is
+		// described by RowsSettled / SkippedClaimed / Errors instead.
+		change := Change{
+			QueueID:      item.ID,
+			Artist:       item.Inputs.Track.ArtistName,
+			Title:        item.Inputs.Track.TrackName,
+			SourcePath:   src,
+			Instrumental: verdict.Instrumental,
+			Telemetry:    tel,
+		}
+		if verdict.Instrumental {
+			change.MarkerPaths = MarkerPaths(item.Inputs)
+		}
+
 		if !verdict.Instrumental {
 			res.NotInstrumental++
 			if opts.DryRun {
 				continue
 			}
-			// Stamp the negative verdict so the row is distinguishable from "never
-			// detected" and a later run does not re-pay the inference. The row stays
-			// deferred: a provider may still find lyrics for it.
+			// A negative verdict is a MUTATION too: it stamps instrumental_result=0,
+			// which removes the row from every future backfill's candidate set. So it
+			// gets the same backup-first treatment as a positive one -- otherwise --yes
+			// could quietly retire rows with no recoverable record of having done so.
+			if opts.Report != nil {
+				if err := opts.Report(change); err != nil {
+					res.Errors++
+					continue
+				}
+			}
+			// The row stays deferred: a provider may still find lyrics for it.
 			stamped, err := b.store.StampUnclassifiedMiss(ctx, item.ID, tel)
 			if err != nil {
 				res.Errors++
@@ -194,19 +237,13 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 			}
 			if !stamped {
 				res.SkippedClaimed++
+				continue
 			}
+			res.RowsStamped++
 			continue
 		}
 
 		res.Instrumental++
-		change := Change{
-			QueueID:     item.ID,
-			Artist:      item.Inputs.Track.ArtistName,
-			Title:       item.Inputs.Track.TrackName,
-			SourcePath:  src,
-			MarkerPaths: MarkerPaths(item.Inputs),
-			Telemetry:   tel,
-		}
 
 		if opts.DryRun {
 			if opts.Preview != nil {
@@ -224,41 +261,62 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 			}
 		}
 
-		if err := b.writeMarkers(item, &res); err != nil {
+		// written records exactly the markers that landed, so a rollback removes what
+		// this run created and nothing else -- a partial write (some paths succeeded,
+		// one failed) must not leave its successful siblings behind.
+		written, err := b.writeMarkers(item)
+		res.MarkersWritten += len(written)
+		if err != nil {
 			res.Errors++
-			// Never stamp a verdict whose marker did not land, or the row would claim
-			// instrumental with nothing on disk. Same ordering rule the worker uses.
+			// Never stamp a verdict whose marker did not fully land, or the row would
+			// claim instrumental against an incomplete set of sidecars. The DB was not
+			// touched, so removing what did land is unambiguously correct.
+			res.MarkersWritten -= b.rollback(written, &res)
 			continue
 		}
 
 		// One guarded transaction: verdict, telemetry, outcome, and completion all
 		// land together or not at all.
-		settled, err := b.store.SettleInstrumental(ctx, item.ID, tel)
+		outcome, err := b.store.SettleInstrumental(ctx, item.ID, tel)
 		if err != nil {
+			// AMBIGUOUS: the error may have come from Commit itself, so the settle may
+			// or may not have landed. Deleting the marker could destroy a committed
+			// result, so keep it and report the error -- an orphan marker is recoverable
+			// by a later run, a deleted valid marker is not. Errs toward the reversible
+			// failure.
 			res.Errors++
+			slog.Warn("instrumentalbackfill: settle failed after the marker was written; leaving the marker in place because the commit outcome is unknown",
+				"id", item.ID, "markers", written, "error", err)
 			continue
 		}
-		if !settled {
-			// A worker claimed the row while the detector was running, so nothing was
-			// written to the DB. Take the marker back rather than leave a sidecar the
-			// database has no record of -- and leave the row entirely to its new owner.
-			if rerr := removeMarkers(change.MarkerPaths); rerr != nil {
-				res.Errors++
-				continue
-			}
-			res.MarkersWritten -= len(change.MarkerPaths)
-			res.Instrumental--
+
+		switch outcome {
+		case queue.Settled:
+			res.RowsSettled++
+		case queue.SettleAlreadyInstrumental:
+			// A PEER BACKFILL settled this row first with the same verdict. The marker
+			// on disk is correct -- it is the peer's, and ours is byte-identical. Do
+			// NOT remove it: that would delete a valid result over a race we lost
+			// harmlessly.
+			res.SkippedAlreadySettled++
+		case queue.SettleClaimed, queue.SettleRowGone:
+			// A worker owns the row, or it is gone. Nothing was written to the DB, so
+			// our marker is an orphan the database has no record of: take it back.
+			res.MarkersWritten -= b.rollback(written, &res)
 			res.SkippedClaimed++
-			continue
+		case queue.SettleFailed:
+			// Unreachable: a failure returns a non-nil error, handled above.
+			res.Errors++
 		}
-		res.RowsSettled++
 	}
 
 	return res, nil
 }
 
-// writeMarkers writes the instrumental marker to every output path for item.
-func (b *Backfiller) writeMarkers(item queue.WorkItem, res *Result) error {
+// writeMarkers writes the instrumental marker to every output path for item,
+// returning the paths that ACTUALLY landed -- including on the error path, so a
+// partial write can be rolled back precisely rather than guessed at.
+func (b *Backfiller) writeMarkers(item queue.WorkItem) (written []string, err error) {
 	song := models.Song{Track: models.Track{
 		ArtistName:   item.Inputs.Track.ArtistName,
 		TrackName:    item.Inputs.Track.TrackName,
@@ -266,12 +324,30 @@ func (b *Backfiller) writeMarkers(item queue.WorkItem, res *Result) error {
 		Instrumental: 1,
 	}}
 	for _, p := range outputPaths(item.Inputs) {
-		if err := b.w.WriteLRC(song, p.Filename, p.Outdir); err != nil {
-			return fmt.Errorf("instrumentalbackfill: write marker for %d: %w", item.ID, err)
+		if werr := b.w.WriteLRC(song, p.Filename, p.Outdir); werr != nil {
+			return written, fmt.Errorf("instrumentalbackfill: write marker for %d: %w", item.ID, werr)
 		}
-		res.MarkersWritten++
+		name, nerr := lyrics.SidecarName(item.Inputs.Track.ArtistName, item.Inputs.Track.TrackName, p.Filename, false)
+		if nerr != nil {
+			return written, fmt.Errorf("instrumentalbackfill: resolve marker name for %d: %w", item.ID, nerr)
+		}
+		written = append(written, filepath.Join(p.Outdir, name))
 	}
-	return nil
+	return written, nil
+}
+
+// rollback removes markers this run wrote and reports how many came off, so the
+// caller can keep MarkersWritten honest. A rollback failure is counted as an
+// error rather than swallowed: it means a sidecar the database has no record of
+// survived on disk, which an operator needs to know about.
+func (b *Backfiller) rollback(written []string, res *Result) int {
+	if err := removeMarkers(written); err != nil {
+		res.Errors++
+		slog.Warn("instrumentalbackfill: could not remove an orphaned marker; a sidecar the database has no record of remains on disk",
+			"markers", written, "error", err)
+		return 0
+	}
+	return len(written)
 }
 
 // outputPaths mirrors the worker's resolution: the enqueued OutputPaths when

@@ -18,32 +18,38 @@ import (
 // written and fsynced before the row is mutated so an applied change always has
 // its restorable record.
 type reconcileInstrumentalBackup struct {
-	QueueID     int64     `json:"queue_id"`
-	Artist      string    `json:"artist"`
-	Title       string    `json:"title"`
-	SourcePath  string    `json:"source_path"`
-	MarkerPaths []string  `json:"marker_paths"`
-	MusicSum    float64   `json:"music_sum"`
-	VocalPeak   float64   `json:"vocal_peak"`
-	SpeechMean  float64   `json:"speech_mean"`
-	VocalClass  string    `json:"vocal_class"`
-	Detector    string    `json:"detector_version"`
-	At          time.Time `json:"at"`
+	QueueID    int64  `json:"queue_id"`
+	Artist     string `json:"artist"`
+	Title      string `json:"title"`
+	SourcePath string `json:"source_path"`
+	// Instrumental records WHICH mutation this row underwent: true settled it and
+	// wrote the markers below; false stamped instrumental_result=0 and left it
+	// deferred. Both are recorded -- a negative stamp also removes the row from
+	// every future backfill, so it needs a restorable record just as much.
+	Instrumental bool      `json:"instrumental"`
+	MarkerPaths  []string  `json:"marker_paths,omitempty"`
+	MusicSum     float64   `json:"music_sum"`
+	VocalPeak    float64   `json:"vocal_peak"`
+	SpeechMean   float64   `json:"speech_mean"`
+	VocalClass   string    `json:"vocal_class"`
+	Detector     string    `json:"detector_version"`
+	At           time.Time `json:"at"`
 }
 
 func appendReconcileInstrumentalBackup(f *os.File, ch instrumentalbackfill.Change) error {
 	rec := reconcileInstrumentalBackup{
-		QueueID:     ch.QueueID,
-		Artist:      ch.Artist,
-		Title:       ch.Title,
-		SourcePath:  ch.SourcePath,
-		MarkerPaths: ch.MarkerPaths,
-		MusicSum:    ch.Telemetry.MusicSum,
-		VocalPeak:   ch.Telemetry.VocalPeak,
-		SpeechMean:  ch.Telemetry.SpeechMean,
-		VocalClass:  ch.Telemetry.VocalClass,
-		Detector:    ch.Telemetry.DetectorVersion,
-		At:          time.Now().UTC(),
+		QueueID:      ch.QueueID,
+		Artist:       ch.Artist,
+		Title:        ch.Title,
+		SourcePath:   ch.SourcePath,
+		Instrumental: ch.Instrumental,
+		MarkerPaths:  ch.MarkerPaths,
+		MusicSum:     ch.Telemetry.MusicSum,
+		VocalPeak:    ch.Telemetry.VocalPeak,
+		SpeechMean:   ch.Telemetry.SpeechMean,
+		VocalClass:   ch.Telemetry.VocalClass,
+		Detector:     ch.Telemetry.DetectorVersion,
+		At:           time.Now().UTC(),
 	}
 	b, err := json.Marshal(rec)
 	if err != nil {
@@ -115,9 +121,14 @@ func runReconcileInstrumental(ctx context.Context, out io.Writer, args ScanRecon
 	if args.Limit > 0 && res.Total > res.Candidates {
 		_, _ = fmt.Fprintf(out, "note: --limit=%d caps this run; %d row(s) left unexamined\n", args.Limit, res.Total-res.Candidates)
 	}
-	_, _ = fmt.Fprintf(out, "reconcile-instrumental done: checked=%d instrumental=%d not-instrumental=%d markers-written=%d rows-settled=%d skipped(detect-off=%d,no-source=%d) errors=%d\n",
-		res.Checked, res.Instrumental, res.NotInstrumental, res.MarkersWritten, res.RowsSettled, res.SkippedDetectOff, res.SkippedNoSource, res.Errors)
-	if args.Yes && res.RowsSettled > 0 {
+	// Two axes, reported separately: what the detector heard, then what happened to
+	// the rows. Folding them into one line is how a claimed row silently looked like
+	// a changed verdict.
+	_, _ = fmt.Fprintf(out, "reconcile-instrumental verdicts: checked=%d instrumental=%d not-instrumental=%d\n",
+		res.Checked, res.Instrumental, res.NotInstrumental)
+	_, _ = fmt.Fprintf(out, "reconcile-instrumental done: markers-written=%d rows-settled=%d rows-stamped=%d skipped(detect-off=%d,no-source=%d,worker-claimed=%d,peer-settled=%d) errors=%d\n",
+		res.MarkersWritten, res.RowsSettled, res.RowsStamped, res.SkippedDetectOff, res.SkippedNoSource, res.SkippedClaimed, res.SkippedAlreadySettled, res.Errors)
+	if args.Yes && (res.RowsSettled > 0 || res.RowsStamped > 0) {
 		_, _ = fmt.Fprintf(out, "backup of classified rows written to %s\n", backupPath)
 	}
 	if res.Errors > 0 {
