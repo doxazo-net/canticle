@@ -1,5 +1,7 @@
 package lyrics
 
+import "strings"
+
 // SourceDetector is the [source:] token stamped into an instrumental marker that
 // the audio detector wrote. Any other source token (a provider lane name) marks
 // a provider-written, editorial-authoritative instrumental. Kept here so the
@@ -18,4 +20,36 @@ type InstrumentalProvenance struct {
 // whether it is provisional (re-checkable) rather than editorially terminal.
 func (p InstrumentalProvenance) IsDetector() bool {
 	return p.Source == SourceDetector
+}
+
+// ReadInstrumentalProvenance reads the file at path and reports whether it is an
+// instrumental marker and, if so, its provenance ([source:]/[dv:]). A legacy bare
+// marker (no header) returns a zero-value InstrumentalProvenance. A file with no
+// marker line returns isMarker=false. Any read error is returned.
+func ReadInstrumentalProvenance(path string) (prov InstrumentalProvenance, isMarker bool, err error) {
+	tags, lyricLines, err := parseLRCHeader(path)
+	if err != nil {
+		return InstrumentalProvenance{}, false, err
+	}
+	for _, t := range tags {
+		switch strings.ToLower(t.key) {
+		case "source":
+			prov.Source = strings.TrimSpace(t.value)
+		case "dv":
+			prov.DetectorVersion = strings.TrimSpace(t.value)
+		}
+		if strings.Contains(t.raw, InstrumentalMarker) {
+			isMarker = true
+		}
+	}
+	for _, l := range lyricLines {
+		if strings.Contains(l, InstrumentalMarker) {
+			isMarker = true
+			break
+		}
+	}
+	if !isMarker {
+		return InstrumentalProvenance{}, false, nil
+	}
+	return prov, true, nil
 }
