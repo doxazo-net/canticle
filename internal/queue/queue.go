@@ -392,6 +392,154 @@ func (q *DBQueue) Complete(ctx context.Context, id int64) error {
 	return nil
 }
 
+// SettleOutcome explains what a guarded settle actually did. It is an enum rather
+// than a bool because "the UPDATE matched no rows" is ambiguous, and the ambiguity
+// is dangerous: the caller has already written a marker to disk, and whether that
+// marker must be removed or preserved depends on WHY the row was not settled.
+type SettleOutcome int
+
+const (
+	// SettleFailed means the operation errored; the outcome is unknown.
+	SettleFailed SettleOutcome = iota
+	// Settled means this call wrote the verdict and completed the row.
+	Settled
+	// SettleClaimed means a serve-mode worker owns the row now (it is no longer
+	// deferred and carries no instrumental verdict). Nothing was written, so the
+	// caller's marker is orphaned and must be removed.
+	SettleClaimed
+	// SettleAlreadyInstrumental means a PEER BACKFILL settled the row first with the
+	// same verdict. The marker on disk is correct and MUST NOT be removed --
+	// deleting it would destroy a valid result the peer just established.
+	SettleAlreadyInstrumental
+	// SettleRowGone means the row no longer exists (e.g. pruned mid-run). Nothing
+	// was written and no marker is warranted.
+	SettleRowGone
+)
+
+// SettleInstrumental records an instrumental verdict on a DEFERRED row and
+// completes it, in ONE transaction: telemetry, instrumental_result=1,
+// outcome_type='instrumental', status='done', and the scan_results writeback all
+// commit together or not at all.
+//
+// It is a single guarded statement rather than the worker's
+// stamp-then-stamp-then-complete sequence because the backfill does NOT own its
+// rows. The worker holds its row in 'processing' for the whole write, so nothing
+// can race it. The backfill leaves rows 'deferred' while the (slow) detector runs,
+// and Dequeue selects status IN ('pending','failed','deferred') -- so a serve-mode
+// worker can and will claim one mid-classification. Guarding only the final step
+// would let the earlier stamps land on a row the worker already owns, leaving it
+// stamped instrumental while the worker goes on to complete it with real lyrics.
+//
+// The outcome is stateful, not a bool, because zero affected rows only proves the
+// row is no longer deferred -- it does NOT prove a worker claimed it. A PEER
+// BACKFILL may have settled it first, and the two demand opposite actions: a
+// worker claim means this run's marker is orphaned and must be removed, while a
+// peer settle means the marker on disk is CORRECT and deleting it would destroy a
+// valid result. So on a no-op the row is re-read inside the same transaction and
+// classified.
+func (q *DBQueue) SettleInstrumental(ctx context.Context, id int64, tel InstrumentalTelemetry) (outcome SettleOutcome, retErr error) {
+	now := formatTime(q.now())
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return SettleFailed, fmt.Errorf("queue: begin settle instrumental tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE work_queue
+         SET instrumental_result = 1,
+             music_sum = ?,
+             vocal_peak = ?,
+             speech_mean = ?,
+             vocal_class = ?,
+             detector_version = ?,
+             outcome_type = 'instrumental',
+             status = 'done',
+             completed_at = ?,
+             last_error = ''
+         WHERE id = ?
+           AND status = 'deferred'`,
+		tel.MusicSum, tel.VocalPeak, tel.SpeechMean, tel.VocalClass, tel.DetectorVersion,
+		now, id,
+	)
+	if err != nil {
+		return SettleFailed, fmt.Errorf("queue: settle instrumental: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return SettleFailed, fmt.Errorf("queue: settle instrumental rows affected: %w", err)
+	}
+	if n == 0 {
+		return q.classifyNoSettle(ctx, tx, id)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE scan_results
+         SET status = 'done'
+         WHERE id IN (SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?)
+           AND status != 'done'`,
+		id,
+	); err != nil {
+		return SettleFailed, fmt.Errorf("queue: settle instrumental scan_results writeback: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return SettleFailed, fmt.Errorf("queue: commit settle instrumental tx: %w", err)
+	}
+	return Settled, nil
+}
+
+// classifyNoSettle explains why the guarded settle UPDATE matched nothing. It
+// reads inside the caller's transaction, so the answer is consistent with the
+// UPDATE that just ran rather than a later, separately-racing read.
+func (q *DBQueue) classifyNoSettle(ctx context.Context, tx *sql.Tx, id int64) (SettleOutcome, error) {
+	var status string
+	var result *int
+	err := tx.QueryRowContext(ctx,
+		`SELECT status, instrumental_result FROM work_queue WHERE id = ?`, id,
+	).Scan(&status, &result)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SettleRowGone, nil
+	}
+	if err != nil {
+		return SettleFailed, fmt.Errorf("queue: classify no-settle for %d: %w", id, err)
+	}
+	// A peer backfill got there first: the row already carries the same verdict this
+	// run was about to write, and the marker on disk is ITS marker and is correct.
+	if status == "done" && result != nil && *result == 1 {
+		return SettleAlreadyInstrumental, nil
+	}
+	return SettleClaimed, nil
+}
+
+// StampUnclassifiedMiss records a NOT-instrumental verdict on a DEFERRED row,
+// leaving it deferred: a provider may still find lyrics for it. Guarded on
+// 'deferred' for the same reason as SettleInstrumental -- it must not stamp a row
+// a worker has since claimed and is writing its own verdict onto.
+//
+// Reports stamped=false when the row is no longer deferred.
+func (q *DBQueue) StampUnclassifiedMiss(ctx context.Context, id int64, tel InstrumentalTelemetry) (bool, error) {
+	res, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue
+         SET instrumental_result = 0,
+             music_sum = ?,
+             vocal_peak = ?,
+             speech_mean = ?,
+             vocal_class = ?,
+             detector_version = ?
+         WHERE id = ?
+           AND status = 'deferred'`,
+		tel.MusicSum, tel.VocalPeak, tel.SpeechMean, tel.VocalClass, tel.DetectorVersion, id,
+	)
+	if err != nil {
+		return false, fmt.Errorf("queue: stamp unclassified miss: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("queue: stamp unclassified miss rows affected: %w", err)
+	}
+	return n > 0, nil
+}
+
 // Release returns a processing item to the pending pool without recording a
 // failure. Used when the worker dequeued the item but cannot process it for a
 // reason that should not count against the row's retry budget (e.g. the
@@ -1295,6 +1443,117 @@ type ListInstrumentalOptions struct {
 	// cross-version prefilter compares stored detector_version against. Required
 	// when All is false.
 	CurrentVersion string
+}
+
+// ListUnclassifiedOptions narrows ListUnclassified.
+type ListUnclassifiedOptions struct {
+	// LibraryID, when non-nil, scopes results to rows linked to that library via
+	// the work_queue_scan_results junction.
+	LibraryID *int64
+	// Limit caps the number of returned rows when > 0.
+	Limit int
+	// GlobalDetectDefault resolves rows whose per-item detect_instrumental is NULL,
+	// mirroring how the worker resolves it. It MUST be applied here, in SQL, rather
+	// than by the caller after the fact: Limit is applied by the database, so an
+	// ineligible row filtered in Go has already consumed a slot. Because the
+	// ordering is deterministic, the same ineligible rows would fill every capped
+	// run and the eligible rows behind them would never be reached -- a permanent
+	// starvation rather than a slow drain.
+	GlobalDetectDefault bool
+}
+
+// detectEligibleClause selects rows whose effective detection decision is ON:
+// the per-item stamp when present, else the global default. Mirrors the worker's
+// resolution (item.DetectInstrumental ?? global).
+func detectEligibleClause(globalDefault bool) (clause string, args []any) {
+	// A NULL stamp defers to the global default; when that default is off, no NULL
+	// row is eligible at all.
+	return " AND (detect_instrumental = 1 OR (detect_instrumental IS NULL AND ?))", []any{globalDefault}
+}
+
+// ListUnclassified returns work_queue rows the detector has never scored
+// (instrumental_result IS NULL) that are parked on a benign provider miss
+// (status = 'deferred') and carry a source path to read.
+//
+// This is the population ListInstrumental structurally cannot reach: it selects
+// instrumental_result = 1 AND status = 'done', so it only re-checks verdicts the
+// detector already confirmed, in order to clear false positives. Nothing selects
+// the inverse -- rows never classified at all -- which is why a queue drained
+// before the detector shipped stays permanently unexamined (#499).
+//
+// 'deferred' is the operative status: those rows already lost their provider
+// round-trip, so classifying them costs no provider request. 'processing' rows are
+// excluded (in-flight), as are rows with no source_path (nothing to feed the
+// detector). Read-only.
+func (q *DBQueue) ListUnclassified(ctx context.Context, opts ListUnclassifiedOptions) (items []WorkItem, retErr error) {
+	const baseQuery = `SELECT id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
+                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id
+                       FROM work_queue
+                       WHERE instrumental_result IS NULL
+                         AND status = 'deferred'
+                         AND TRIM(COALESCE(source_path, '')) <> ''`
+	const orderClause = ` ORDER BY priority DESC, created_at ASC, id ASC`
+	query := baseQuery
+	var args []any
+	// Eligibility BEFORE the limit: an ineligible row filtered in Go has already
+	// consumed a slot, and the deterministic ordering would hand the same
+	// ineligible rows to every capped run forever.
+	detClause, detArgs := detectEligibleClause(opts.GlobalDetectDefault)
+	query += detClause
+	args = append(args, detArgs...)
+	libClause, libArgs := recheckLibraryClause(opts.LibraryID)
+	query += libClause
+	args = append(args, libArgs...)
+	query += orderClause
+	if opts.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, opts.Limit)
+	}
+
+	rows, err := q.db.QueryContext(ctx, query, args...) //nolint:gosec // G202: all concatenated fragments are package constants / recheckLibraryClause's + detectEligibleClause's fixed clauses; never user-built SQL
+	if err != nil {
+		return nil, fmt.Errorf("queue: list unclassified: %w", err)
+	}
+	defer func() {
+		if err := rows.Close(); err != nil && retErr == nil {
+			retErr = fmt.Errorf("queue: close list unclassified rows: %w", err)
+		}
+	}()
+	for rows.Next() {
+		item, err := scanWorkItem(rows)
+		if err != nil {
+			return nil, fmt.Errorf("queue: list unclassified scan: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue: list unclassified rows: %w", err)
+	}
+	return items, nil
+}
+
+// CountUnclassified returns the total number of rows ListUnclassified would
+// consider, ignoring Limit, so a run can report coverage against the backlog.
+// It applies the SAME eligibility rule as ListUnclassified: a total that counted
+// rows the run can never classify would overstate the backlog and make a capped
+// run's "N left unexamined" a lie.
+func (q *DBQueue) CountUnclassified(ctx context.Context, libraryID *int64, globalDetectDefault bool) (int, error) {
+	query := `SELECT COUNT(*) FROM work_queue
+              WHERE instrumental_result IS NULL
+                AND status = 'deferred'
+                AND TRIM(COALESCE(source_path, '')) <> ''`
+	var args []any
+	detClause, detArgs := detectEligibleClause(globalDetectDefault)
+	query += detClause
+	args = append(args, detArgs...)
+	libClause, libArgs := recheckLibraryClause(libraryID)
+	query += libClause
+	args = append(args, libArgs...)
+	var n int
+	if err := q.db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil { //nolint:gosec // G202: fragments are package constants / recheckLibraryClause's + detectEligibleClause's fixed clauses; never user-built SQL
+		return 0, fmt.Errorf("queue: count unclassified: %w", err)
+	}
+	return n, nil
 }
 
 // ListInstrumental returns work_queue rows flagged instrumental
