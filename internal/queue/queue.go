@@ -1608,6 +1608,65 @@ func (q *DBQueue) ListInstrumental(ctx context.Context, opts ListInstrumentalOpt
 	return items, nil
 }
 
+// ListVocalGateRejectionsOptions narrows the stamped-not-instrumental listing.
+type ListVocalGateRejectionsOptions struct {
+	LibraryID *int64
+	Limit     int
+}
+
+// StampedRejection is one instrumental_result=0 row with its stored telemetry,
+// for re-deciding under a recalibrated threshold without re-scanning audio.
+type StampedRejection struct {
+	ID         int64
+	Artist     string
+	Title      string
+	SourcePath string
+	Tel        InstrumentalTelemetry
+}
+
+// ListVocalGateRejections returns deferred rows the detector previously marked
+// not-instrumental (instrumental_result=0) that carry re-decidable stored
+// telemetry (music_sum/vocal_peak/speech_mean non-NULL). Legacy rows missing
+// those scores are skipped: they cannot be re-decided from stored scores alone.
+// Read-only.
+func (q *DBQueue) ListVocalGateRejections(ctx context.Context, opts ListVocalGateRejectionsOptions) (out []StampedRejection, retErr error) {
+	query := `SELECT id, COALESCE(artist,''), COALESCE(title,''), COALESCE(source_path,''),
+	                 music_sum, vocal_peak, speech_mean, COALESCE(vocal_class,''), COALESCE(detector_version,'')
+	          FROM work_queue
+	          WHERE instrumental_result = 0 AND status = 'deferred'
+	            AND music_sum IS NOT NULL AND vocal_peak IS NOT NULL AND speech_mean IS NOT NULL`
+	var args []any
+	libClause, libArgs := recheckLibraryClause(opts.LibraryID)
+	query += libClause //nolint:gosec // G202: libClause is a package-constant fragment from recheckLibraryClause, never user-built SQL
+	args = append(args, libArgs...)
+	query += ` ORDER BY id`
+	if opts.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, opts.Limit)
+	}
+	rows, err := q.db.QueryContext(ctx, query, args...) //nolint:gosec // G202: fragments are package constants / fixed clauses, never user-built SQL
+	if err != nil {
+		return nil, fmt.Errorf("queue: list vocal-gate rejections: %w", err)
+	}
+	defer func() {
+		if err := rows.Close(); err != nil && retErr == nil {
+			retErr = fmt.Errorf("queue: close list vocal-gate rejections rows: %w", err)
+		}
+	}()
+	for rows.Next() {
+		var r StampedRejection
+		if err := rows.Scan(&r.ID, &r.Artist, &r.Title, &r.SourcePath,
+			&r.Tel.MusicSum, &r.Tel.VocalPeak, &r.Tel.SpeechMean, &r.Tel.VocalClass, &r.Tel.DetectorVersion); err != nil {
+			return nil, fmt.Errorf("queue: scan vocal-gate rejection: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue: list vocal-gate rejections rows: %w", err)
+	}
+	return out, nil
+}
+
 // CountInstrumentalNarrowed returns how many instrumental_result = 1 rows the
 // telemetry-narrowed prefilter would select (the same predicate ListInstrumental
 // applies when opts.All is false), so reconcile can report prefiltered-vs-total
