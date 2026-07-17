@@ -29,8 +29,9 @@ type Options struct {
 type Summary struct {
 	Scanned    int // .lrc files examined
 	Normalized int // rewritten (apply) or would-be-rewritten (dry run)
-	Clean      int // already expanded; skipped
-	Skipped    int // symlinks and other intentional skips
+	Clean      int // already expanded; nothing to do
+	Skipped    int // symlinks and other benign, non-actionable skips
+	Blocked    int // still stacked but a pre-existing .orig bars a safe rewrite
 	Errors     int // per-file failures (the run continues past them)
 }
 
@@ -82,6 +83,8 @@ func Run(opts Options) (Summary, error) {
 				s.Clean++
 			case StatusSkipped:
 				s.Skipped++
+			case StatusBlocked:
+				s.Blocked++
 			}
 			return nil
 		})
@@ -118,6 +121,11 @@ const (
 	StatusNormalized
 	// StatusSkipped means the file was intentionally not processed (e.g. symlink).
 	StatusSkipped
+	// StatusBlocked means the file still needs work but a pre-existing .orig
+	// prevents a verifiable rewrite. Unlike StatusSkipped this always warrants
+	// operator attention, and is counted separately so a zero tally is a real
+	// all-clear (issue #487).
+	StatusBlocked
 )
 
 // Result reports what happened to a single file.
@@ -151,14 +159,14 @@ func NormalizeFile(path string, report func(backupPath string) error) (Result, e
 
 	// Refuse to overwrite a .lrc whose .orig backup already exists: we cannot
 	// verify that pre-existing backup is the true pristine original, and
-	// overwriting would leave the current bytes backed up nowhere. Skip instead
-	// (conservative-on-uncertainty). In normal single-tool operation this is
-	// unreachable -- after one expand the file is already clean and never
-	// rewritten -- so a .orig here means external interference.
+	// overwriting would leave the current bytes backed up nowhere. Decline
+	// instead (conservative-on-uncertainty). In normal single-tool operation this
+	// is unreachable -- after one expand the file is already clean and never
+	// rewritten -- so a .orig here means a concurrent run or external
+	// interference. classifyBackupExists re-reads to tell those apart.
 	backupPath := path + ".orig"
 	if _, statErr := os.Lstat(backupPath); statErr == nil {
-		slog.Warn("lrcbackfill: .orig backup already exists; skipping to avoid an unverified overwrite", "path", path, "backup", backupPath)
-		return Result{Status: StatusSkipped}, nil
+		return classify(path, backupPath)
 	} else if !os.IsNotExist(statErr) {
 		return Result{}, fmt.Errorf("stat backup %s: %w", backupPath, statErr)
 	}
@@ -190,7 +198,59 @@ func NormalizeFile(path string, report func(backupPath string) error) (Result, e
 	return Result{Status: StatusNormalized, Backup: backupPath}, nil
 }
 
+// classifyBackupExists decides what a pre-existing .orig means for path, and is
+// the fix for issue #487. The caller's needs-work verdict was computed from bytes
+// read BEFORE the backup was observed, so a concurrent run may have expanded the
+// file in between; those stale bytes cannot distinguish the two states. Re-read
+// the current file and re-apply the gate:
+//
+//   - no longer stacked -> a peer run finished the rewrite and the .orig is its
+//     legitimate backup. Benign, no work remains, and emphatically not a warning:
+//     an operator who "cleared the blockage" here would delete a real backup.
+//   - still stacked -> the .orig genuinely bars the rewrite. Warn; needs an operator.
+//
+// classify is classifyBackupExists, indirected so a test can pin that the
+// .orig-exists paths actually ROUTE here rather than deciding from bytes they
+// already hold.
+//
+// That routing is the entire fix for #487 and it cannot be reached from a
+// fixture: NormalizeFile only consults the .orig gate when the file was stacked
+// at load time, so the benign case (a peer expanded it in between) requires the
+// file to change between load() and the Lstat. Without this seam a regression
+// that classified from the stale bytes -- the exact pre-fix bug -- passes the
+// whole suite, because testing classifyBackupExists directly can never
+// distinguish a re-read from a stale read: on disk they are the same bytes.
+var classify = classifyBackupExists
+
+func classifyBackupExists(path, backupPath string) (Result, error) {
+	cur, _, skip, err := load(path)
+	if err != nil {
+		// The re-read failed where the first read succeeded (the file vanished or
+		// became unreadable mid-run). The row is counted as an error, NOT as
+		// Blocked -- which is why a zero blocked tally is only an all-clear
+		// alongside zero errors.
+		return Result{}, err
+	}
+	if skip {
+		// Defensive, not live: both callers already returned on skip before
+		// consulting the .orig gate, so this only fires if the path became a symlink
+		// between their load and this re-read. Kept rather than deleted because it is
+		// the correct answer if a future caller reaches here without pre-checking.
+		return Result{Status: StatusSkipped}, nil
+	}
+	if _, stacked := lrcnormalize.NormalizeBody(string(cur)); !stacked {
+		slog.Debug("lrcbackfill: .orig backup exists and the .lrc is already expanded; nothing to do",
+			"path", path, "backup", backupPath)
+		return Result{Status: StatusClean}, nil
+	}
+	slog.Warn("lrcbackfill: BLOCKED -- .lrc is still stacked but a pre-existing .orig bars a verifiable rewrite; operator action required (compare the two, then remove or rename the .orig and re-run)",
+		"path", path, "backup", backupPath)
+	return Result{Status: StatusBlocked}, nil
+}
+
 // inspect reports what NormalizeFile would do, without writing anything (dry run).
+// It mirrors NormalizeFile's .orig gate so a dry run never promises a rewrite that
+// apply would decline -- the count is the only output some callers have (#470 AC2).
 func inspect(path string) (Result, error) {
 	raw, _, skip, err := load(path)
 	if err != nil {
@@ -202,7 +262,13 @@ func inspect(path string) (Result, error) {
 	if _, changed := lrcnormalize.NormalizeBody(string(raw)); !changed {
 		return Result{Status: StatusClean}, nil
 	}
-	return Result{Status: StatusNormalized, Backup: path + ".orig"}, nil
+	backupPath := path + ".orig"
+	if _, statErr := os.Lstat(backupPath); statErr == nil {
+		return classify(path, backupPath)
+	} else if !os.IsNotExist(statErr) {
+		return Result{}, fmt.Errorf("stat backup %s: %w", backupPath, statErr)
+	}
+	return Result{Status: StatusNormalized, Backup: backupPath}, nil
 }
 
 // load reads path, returning its body and permission bits. skip is true (with a

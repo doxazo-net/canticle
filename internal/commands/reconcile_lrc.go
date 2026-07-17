@@ -97,14 +97,29 @@ func runReconcileLRC(ctx context.Context, out io.Writer, args ScanReconcileLRCCm
 	if args.Yes {
 		verb = "rewrote"
 	}
-	_, _ = fmt.Fprintf(out, "reconcile-lrc: %s %d stacked .lrc file(s) (%d scanned, %d already clean, %d skipped, %d errors)%s\n",
-		verb, summary.Normalized, summary.Scanned, summary.Clean, summary.Skipped, summary.Errors, suffixDryRun(args.Yes))
+	_, _ = fmt.Fprintf(out, "reconcile-lrc: %s %d stacked .lrc file(s) (%d scanned, %d already clean, %d skipped, %d blocked, %d errors)%s\n",
+		verb, summary.Normalized, summary.Scanned, summary.Clean, summary.Skipped, summary.Blocked, summary.Errors, suffixDryRun(args.Yes))
+	if summary.Blocked > 0 {
+		// Blocked files are the only tally that demands follow-up, and the count
+		// alone is useless without the paths -- which are in the WARN lines.
+		_, _ = fmt.Fprintf(out, "%d file(s) still stacked but blocked by a pre-existing .orig; see the BLOCKED warnings above for paths\n", summary.Blocked)
+	}
 	if lb != nil && lb.opened() {
 		_, _ = fmt.Fprintf(out, "backup records written to %s\n", backupPath)
 	}
-	if summary.Errors > 0 {
-		// A partial reconciliation is not success: some files failed and were
-		// left untouched, so callers/scripts must see a non-zero exit.
+	if summary.Errors > 0 || summary.Blocked > 0 {
+		// A partial reconciliation is not success: some files failed or were left
+		// untouched, so callers/scripts must see a non-zero exit.
+		//
+		// Blocked counts here deliberately (#487). A blocked file is still stacked,
+		// was left untouched, and its WARN says "operator action required" -- that is
+		// the same partial reconciliation the errors rule already covers. Exiting 0
+		// would tell a script "all clear" while telling a human "you must act", which
+		// is precisely the benign/actionable conflation this issue removes, just at
+		// the exit-code level. Before #487 blocked files were tallied as Skipped and
+		// exited 0; promoting them to their own actionable tally without moving the
+		// machine-readable signal would leave scripts blind to the one state that
+		// demands attention.
 		return 1
 	}
 	return 0
