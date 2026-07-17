@@ -1750,6 +1750,35 @@ func (q *DBQueue) ResetInstrumental(ctx context.Context, id int64) (int64, error
 	return n, nil
 }
 
+// ResetInstrumentalToUnclassified clears a stamped not-instrumental verdict
+// (instrumental_result = 0) back to NULL, without touching status, priority,
+// or the stored telemetry columns. Used by instrumentalrecalib when a
+// vocal-gate rejection now PASSES the reconfigured thresholds but was scored
+// by a detector_version other than the current one: the stale telemetry is
+// not trustworthy enough to settle on directly, so the row is dropped back
+// to "never classified" and picked up by the next reconcile/backfill pass,
+// which re-scans it with the current detector instead.
+//
+// Guarded on status = 'deferred' -- the same guard StampUnclassifiedMiss
+// uses -- so a row a worker has since claimed is left alone. Returns whether
+// the row was reset.
+func (q *DBQueue) ResetInstrumentalToUnclassified(ctx context.Context, id int64) (bool, error) {
+	res, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue
+         SET instrumental_result = NULL
+         WHERE id = ? AND status = 'deferred'`,
+		id,
+	)
+	if err != nil {
+		return false, fmt.Errorf("queue: reset instrumental to unclassified: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("queue: reset instrumental to unclassified rows affected: %w", err)
+	}
+	return n > 0, nil
+}
+
 // CancelByLibrary rebuilds or deletes pending/failed/deferred work_queue rows whose
 // output_paths derive from libraryID. Each affected row's output_paths JSON is
 // filtered to retain only entries that appear in scan_results from libraries

@@ -49,3 +49,15 @@ func TestListVocalGateRejections(t *testing.T) {
 		t.Fatalf("unexpected rows: %+v", got)
 	}
 }
+
+func TestResetInstrumentalToUnclassified(t *testing.T) {
+	q := NewDBQueue(openQueueTestDB(t))
+	ctx := context.Background()
+	id := seedDeferredRow(t, q, "Artist", "Title", "/music/a.flac")
+	if _, err := q.StampUnclassifiedMiss(ctx, id, InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0"}); err != nil {
+		t.Fatalf("stamp: %v", err)
+	}
+	if reset, err := q.ResetInstrumentalToUnclassified(ctx, id); err != nil || !reset {
+		t.Fatalf("reset: got %v, %v", reset, err)
+	}
+}
