@@ -257,3 +257,48 @@ func TestListVocalGateRejections_Limit(t *testing.T) {
 		t.Fatalf("len(got) = %d; want 2 (Limit must cap the result set)", len(got))
 	}
 }
+
+func TestListDetectorInstrumentalMarkers(t *testing.T) {
+	q := NewDBQueue(openQueueTestDB(t))
+	ctx := context.Background()
+
+	// Detector-written instrumental: instrumental_result=1, status=done, dv set.
+	detID := seedDeferredRow(t, q, "Det Artist", "Det Title", "/music/det.flac")
+	if _, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue SET instrumental_result=1, status='done', outcome_type='instrumental', detector_version='1.5.0' WHERE id=?`, detID); err != nil {
+		t.Fatalf("seed detector row: %v", err)
+	}
+	// Provider-written instrumental: outcome_type='instrumental', instrumental_result NULL. Must be EXCLUDED.
+	provID := seedDeferredRow(t, q, "Prov Artist", "Prov Title", "/music/prov.flac")
+	if _, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue SET outcome_type='instrumental', status='done' WHERE id=?`, provID); err != nil {
+		t.Fatalf("seed provider row: %v", err)
+	}
+	// Never-detected row: instrumental_result NULL, still deferred. Must be EXCLUDED.
+	_ = seedDeferredRow(t, q, "Never", "Scored", "/music/never.flac")
+
+	got, err := q.ListDetectorInstrumentalMarkers(ctx, ListInstrumentalMarkersOptions{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected exactly the detector row, got %d: %+v", len(got), got)
+	}
+	r := got[0]
+	if r.ID != detID {
+		t.Errorf("ID = %d, want %d", r.ID, detID)
+	}
+	if r.DetectorVersion != "1.5.0" {
+		t.Errorf("DetectorVersion = %q, want 1.5.0", r.DetectorVersion)
+	}
+	if r.Inputs.Track.ArtistName != "Det Artist" || r.Inputs.Track.TrackName != "Det Title" {
+		t.Errorf("track = %q/%q, want Det Artist/Det Title", r.Inputs.Track.ArtistName, r.Inputs.Track.TrackName)
+	}
+	if r.Inputs.Outdir != "out" || r.Inputs.Filename != "a.lrc" {
+		t.Errorf("outdir/filename = %q/%q, want out/a.lrc", r.Inputs.Outdir, r.Inputs.Filename)
+	}
+	// OutputPaths hydrates from the empty output_paths column via the (outdir, filename) fallback.
+	if len(r.Inputs.OutputPaths) != 1 || r.Inputs.OutputPaths[0].Outdir != "out" || r.Inputs.OutputPaths[0].Filename != "a.lrc" {
+		t.Errorf("OutputPaths = %+v, want one {out, a.lrc}", r.Inputs.OutputPaths)
+	}
+}
