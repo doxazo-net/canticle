@@ -2387,6 +2387,7 @@ func configKeys() []string {
 		"verification.sample_duration_seconds",
 		"verification.min_confidence",
 		"verification.min_similarity",
+		"instrumental_detector.ordering",
 		"guard.accepted_scripts",
 		"guard.script_guard_threshold",
 	}
@@ -2444,6 +2445,8 @@ func configValue(cfg config.Config, key string) (string, bool) {
 		return strconv.FormatFloat(cfg.Verification.MinConfidence, 'f', -1, 64), true
 	case "verification.min_similarity":
 		return strconv.FormatFloat(cfg.Verification.MinSimilarity, 'f', -1, 64), true
+	case "instrumental_detector.ordering":
+		return cfg.InstrumentalDetector.Ordering, true
 	case "guard.accepted_scripts":
 		return strings.Join(cfg.Guard.AcceptedScripts, ","), true
 	case "guard.script_guard_threshold":
@@ -2576,6 +2579,12 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 			return fmt.Errorf("verification.min_similarity must be a number between 0 and 1")
 		}
 		cfg.Verification.MinSimilarity = n
+	case "instrumental_detector.ordering":
+		m := strings.ToLower(strings.TrimSpace(value))
+		if m != "front" && m != "demoted" {
+			return fmt.Errorf("instrumental_detector.ordering must be \"front\" or \"demoted\"")
+		}
+		cfg.InstrumentalDetector.Ordering = m
 	case "guard.accepted_scripts":
 		// An empty value is valid: it clears the allowlist and disables the guard.
 		cfg.Guard.AcceptedScripts = splitCSV(value)

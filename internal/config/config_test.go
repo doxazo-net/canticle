@@ -33,7 +33,7 @@ func isolateEnv(t *testing.T) {
 		"MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS", "MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES",
 		"MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE", "MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES",
 		"MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES", "MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE",
-		"MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH",
+		"MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH", "MXLRC_INSTRUMENTAL_DETECTOR_ORDERING",
 		"MXLRC_GUARD_ACCEPTED_SCRIPTS", "MXLRC_GUARD_THRESHOLD",
 		"MXLRC_QUEUE_RANDOMIZE",
 		"MXLRCGO_WATCH_ENABLED", "MXLRCGO_WATCH_DEBOUNCE_MS", "MXLRCGO_WATCH_MAX_DIRS",
@@ -2078,5 +2078,25 @@ min_confidence = 0.85
 	}
 	if cfg.InstrumentalDetector.MinConfidence != 0.95 {
 		t.Errorf("MinConfidence = %v; want 0.95 (env override)", cfg.InstrumentalDetector.MinConfidence)
+	}
+}
+
+// TestInstrumentalDetectorOrdering_DefaultAndEnv covers the
+// instrumental_detector.ordering toggle: it defaults to "demoted" and can be
+// overridden via MXLRC_INSTRUMENTAL_DETECTOR_ORDERING.
+func TestInstrumentalDetectorOrdering_DefaultAndEnv(t *testing.T) {
+	isolateEnv(t)
+	cfg := defaults()
+	if cfg.InstrumentalDetector.Ordering != detectorOrderingDemoted {
+		t.Fatalf("default ordering = %q, want %q", cfg.InstrumentalDetector.Ordering, detectorOrderingDemoted)
+	}
+	t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_ORDERING", "front")
+	applied := map[string]bool{}
+	applyEnvOverrides(&cfg, applied)
+	if cfg.InstrumentalDetector.Ordering != detectorOrderingFront {
+		t.Fatalf("env override ordering = %q, want %q", cfg.InstrumentalDetector.Ordering, detectorOrderingFront)
+	}
+	if !applied["instrumental_detector.ordering"] {
+		t.Fatal("applied map missing instrumental_detector.ordering")
 	}
 }
