@@ -76,7 +76,7 @@ func runReconcileMarkerProvenance(ctx context.Context, out io.Writer, args ScanR
 		}
 	}()
 
-	var stamped, skipped int
+	var stamped, skipped, errored int
 	for _, r := range rows {
 		for _, p := range instrumentalbackfill.MarkerPaths(r.Inputs) {
 			prov, isMarker, rerr := lyrics.ReadInstrumentalProvenance(p)
@@ -99,6 +99,7 @@ func runReconcileMarkerProvenance(ctx context.Context, out io.Writer, args ScanR
 			})
 			if werr != nil {
 				slog.Warn("reconcile-marker-provenance: stamp failed", "path", p, "error", werr)
+				errored++
 				continue
 			}
 			if !changed {
@@ -106,6 +107,7 @@ func runReconcileMarkerProvenance(ctx context.Context, out io.Writer, args ScanR
 				continue
 			}
 			stamped++
+			// Backup is an audit log, not a recovery necessity: WriteMarkerProvenance is purely additive and trivially reversible (strip the [by:]/[source:]/[dv:] header lines), so it is written after the stamp rather than before.
 			if backupFile == nil {
 				f, ferr := os.OpenFile(backupPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // G304: backupPath is operator-supplied or derived from the configured db dir
 				if ferr != nil {
@@ -129,8 +131,8 @@ func runReconcileMarkerProvenance(ctx context.Context, out io.Writer, args ScanR
 	if args.Yes {
 		verb = "stamped"
 	}
-	_, _ = fmt.Fprintf(out, "reconcile-marker-provenance: scanned %d detector marker row(s)%s; %s %d, skipped %d%s\n",
-		len(rows), env.libLabel, verb, stamped, skipped, suffixDryRun(args.Yes))
+	_, _ = fmt.Fprintf(out, "reconcile-marker-provenance: scanned %d detector marker row(s)%s; %s %d, skipped %d, errored %d%s\n",
+		len(rows), env.libLabel, verb, stamped, skipped, errored, suffixDryRun(args.Yes))
 	if backupFile != nil {
 		_, _ = fmt.Fprintf(out, "backup written to %s\n", backupPath)
 	}
