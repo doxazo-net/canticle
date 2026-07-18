@@ -989,12 +989,6 @@ func (w *Worker) stampDetectorInstrumental(ctxNoCancel context.Context, item que
 // hand-built literal.
 func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.WorkItem, resolvedTrack models.Track, song models.Song) error {
 	slog.Info("worker audio detector: instrumental track confirmed; writing marker", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "kind", "instrumental")
-	encoded, encErr := encodeSong(song)
-	if encErr != nil {
-		slog.Warn("worker instrumental detection: cache encode failed; treating as miss", "id", item.ID, "error", encErr)
-	} else if storeErr := w.cache.Store(context.WithoutCancel(ctx), resolvedTrack.ArtistName, resolvedTrack.TrackName, normalize.DurationBucket(resolvedTrack.TrackLength), encoded); storeErr != nil {
-		slog.Warn("worker instrumental detection: cache store failed; continuing to write", "id", item.ID, "error", storeErr)
-	}
 	for _, p := range outputPaths(item.Inputs) {
 		if writeErr := w.writer.WriteLRC(song, p.Filename, p.Outdir); writeErr != nil {
 			writeErr = fmt.Errorf("worker: write instrumental item %d output %s/%s: %w", item.ID, p.Outdir, p.Filename, writeErr)
@@ -1007,6 +1001,18 @@ func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.Wo
 		}
 	}
 	ctxNoCancel := context.WithoutCancel(ctx)
+	// Cache-store only AFTER every output marker write succeeded (a failed
+	// WriteLRC above requeues and returns before here). Storing earlier would let
+	// a write failure leave a cached instrumental song behind; the deferred retry
+	// would then hit the cache and complete without ever restoring
+	// instrumental_result or the detector telemetry, since those are not
+	// serialized into the cached song.
+	encoded, encErr := encodeSong(song)
+	if encErr != nil {
+		slog.Warn("worker instrumental detection: cache encode failed; treating as miss", "id", item.ID, "error", encErr)
+	} else if storeErr := w.cache.Store(ctxNoCancel, resolvedTrack.ArtistName, resolvedTrack.TrackName, normalize.DurationBucket(resolvedTrack.TrackLength), encoded); storeErr != nil {
+		slog.Warn("worker instrumental detection: cache store failed; continuing to write", "id", item.ID, "error", storeErr)
+	}
 	// Stamp instrumental_result=1 + telemetry + outcome type only AFTER the
 	// marker write succeeded (a failed WriteLRC above requeues and returns before
 	// here), so a transient write error never leaves a row tagged instrumental

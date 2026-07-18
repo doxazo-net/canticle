@@ -2106,6 +2106,14 @@ func TestRunOnceDetectorInstrumentalWriteErrorDefersAsMiss(t *testing.T) {
 	if w.consecutiveFailures != 0 {
 		t.Fatalf("consecutiveFailures = %d; want 0", w.consecutiveFailures)
 	}
+	// A write failure must NOT leave a cached instrumental song behind: the cache
+	// store must happen only after the output marker writes succeed, else a
+	// deferred retry would hit the cache and complete without ever restoring
+	// instrumental_result or the detector telemetry (those are not serialized
+	// into the cached song).
+	if len(c.stores) != 0 {
+		t.Fatalf("cache stores = %d; want none (write failed; must not cache)", len(c.stores))
+	}
 }
 
 // TestRunOnceGuardInstalledWithOneProviderPlusDetector verifies the guard is
