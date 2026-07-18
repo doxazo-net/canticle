@@ -25,9 +25,14 @@ var (
 	// ErrInvalidSession is returned by ValidateSession for an unknown, expired, or
 	// orphaned session token.
 	ErrInvalidSession = errors.New("webauth: invalid session")
-	// ErrPasswordTooShort is returned by Setup when the password is shorter than
-	// MinPasswordLength.
+	// ErrPasswordTooShort is returned by Setup and SetPassword when the password
+	// is shorter than MinPasswordLength.
 	ErrPasswordTooShort = fmt.Errorf("webauth: password must be at least %d characters", MinPasswordLength)
+	// ErrUserNotFound is returned by SetPassword when the named user does not
+	// exist. Unlike Login, SetPassword is an administrative operation reached
+	// only by an operator who already controls the host or an authenticated
+	// session, so naming the failure is an aid rather than an enumeration risk.
+	ErrUserNotFound = errors.New("webauth: user not found")
 )
 
 // Service ties the user and session stores together into the browser-auth core:
@@ -107,6 +112,46 @@ func (s *Service) Setup(ctx context.Context, username, password string) (User, e
 		return User{}, fmt.Errorf("webauth: setup: %w", err)
 	}
 	return user, nil
+}
+
+// SetPassword replaces an existing user's password and revokes their sessions.
+//
+// This is the supported credential-rotation path (#545). Before it existed the
+// env bootstrap was the only way a password ever got set, and it deliberately
+// refuses to overwrite an existing admin -- so an operator who edited the
+// bootstrap value and restarted saw a healthy service, an INFO line reading
+// "skipped", and the OLD password still live. The only remaining route was
+// deleting the user row from the database.
+//
+// Sessions are revoked as part of the rotation, ATOMICALLY with the hash update.
+// An operator changing a compromised credential expects tokens minted under the
+// old one to stop working, and the two writes must not be separable: applying
+// the hash but failing the revoke would leave the new password active while old
+// sessions stayed valid, and the returned error would tell the operator that
+// nothing had happened. RotateCredential performs both in one transaction, so
+// the rotation either fully applies or leaves the account untouched.
+func (s *Service) SetPassword(ctx context.Context, username, password string) error {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return fmt.Errorf("webauth: username must not be empty")
+	}
+	if len(password) < MinPasswordLength {
+		return ErrPasswordTooShort
+	}
+	hash, err := HashPassword(password)
+	if err != nil {
+		return fmt.Errorf("webauth: set password: %w", err)
+	}
+	// RotateCredential reports ErrUserNotFound itself (its UPDATE matches zero
+	// rows), so no separate existence check is needed -- and a check-then-write
+	// pair would reintroduce a race the single transaction closes.
+	if _, err := s.users.RotateCredential(ctx, username, hash); err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return ErrUserNotFound
+		}
+		return fmt.Errorf("webauth: set password: %w", err)
+	}
+	return nil
 }
 
 // Login verifies credentials and, on success, creates a session and returns its
