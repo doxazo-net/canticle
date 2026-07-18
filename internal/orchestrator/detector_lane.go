@@ -37,6 +37,14 @@ func NewDetectorLane(d detector.Detector, breaker *circuit.Breaker) *Lane {
 			if !res.Instrumental {
 				return models.Song{}, ErrLaneBenignMiss
 			}
+			// Only these identity fields are carried, deliberately: this mirrors the
+			// inline miss-branch path in the worker that this lane replaces, so the
+			// settled song is byte-identical to today's. Note it therefore also
+			// inherits that path's limitation of dropping the remaining
+			// models.Track fields (AlbumArtist, TrackLength, HasLyrics,
+			// HasSubtitles, ISRC, SpotifyID, RecordingMBID). Widening this to copy
+			// the incoming track is a behavior change, tracked separately, not a
+			// silent tweak to make here.
 			return models.Song{
 				Track: models.Track{
 					ArtistName:   track.ArtistName,
