@@ -372,6 +372,9 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 		return opts.BFS != id1
 	})
 
+	// reopen is loop-invariant for this directory scan (opts is fixed), so compute
+	// it once rather than per file.
+	reopen := reopenClassesFor(opts)
 	for _, file := range files {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -405,7 +408,6 @@ func (sc *Scanner) scanDir(ctx context.Context, dir string, opts ScanOptions, de
 			txtExists = true
 		}
 
-		reopen := reopenClassesFor(opts)
 		switch {
 		case lrcExists && !opts.Update:
 			// Synced lyrics already present and not asked to update -- skip.
