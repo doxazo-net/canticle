@@ -98,3 +98,14 @@ func TestIsSuitable(t *testing.T) {
 		})
 	}
 }
+
+func TestIsSuitable_DetectorInstrumentalIsTerminal(t *testing.T) {
+	detectorInst := models.Song{Track: models.Track{Instrumental: 1}, DetectorVersion: "1.5.0"}
+	if !IsSuitable(detectorInst, nil) {
+		t.Error("detector-sourced instrumental must be terminal-suitable")
+	}
+	providerInst := models.Song{Track: models.Track{Instrumental: 1}} // no DetectorVersion
+	if IsSuitable(providerInst, nil) {
+		t.Error("provider-sourced instrumental must remain not-suitable (best-available only)")
+	}
+}
