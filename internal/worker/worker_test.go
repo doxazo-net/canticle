@@ -114,6 +114,7 @@ type fakeQueue struct {
 	releaseErr         error
 	retireErr          error
 	setProviderLaneErr error
+	instrumentalStamps []instrumentalStamp
 }
 
 func (q *fakeQueue) Dequeue(_ context.Context) (queue.WorkItem, error) {
@@ -174,7 +175,17 @@ func (q *fakeQueue) RetireMiss(_ context.Context, id int64) (queue.WorkItem, err
 	return queue.WorkItem{ID: id, Status: queue.StatusDone}, nil
 }
 
-func (q *fakeQueue) SetInstrumentalResult(_ context.Context, _ int64, _ int, _ queue.InstrumentalTelemetry) error {
+// instrumentalStamp captures one SetInstrumentalResult call so tests can
+// assert both the result flag and the telemetry that round-tripped through
+// the stamp path.
+type instrumentalStamp struct {
+	ID     int64
+	Result int
+	Tel    queue.InstrumentalTelemetry
+}
+
+func (q *fakeQueue) SetInstrumentalResult(_ context.Context, id int64, result int, tel queue.InstrumentalTelemetry) error {
+	q.instrumentalStamps = append(q.instrumentalStamps, instrumentalStamp{ID: id, Result: result, Tel: tel})
 	return nil
 }
 
@@ -320,6 +331,27 @@ type fakeGuard struct {
 }
 
 func (g *fakeGuard) Enabled() bool { return g.enabled }
+
+// selectiveGuard rejects only a song whose lyric body exactly matches
+// rejectBody, accepting everything else (including a textless instrumental
+// result) - unlike fakeGuard, which rejects unconditionally regardless of
+// content. This models how a real script guard behaves: it screens lyric
+// text, so it has nothing to reject on a detector-sourced instrumental.
+type selectiveGuard struct {
+	rejectBody string
+	reason     string
+	calls      []models.Song
+}
+
+func (g *selectiveGuard) Enabled() bool { return true }
+
+func (g *selectiveGuard) Accept(song models.Song) (bool, string) {
+	g.calls = append(g.calls, song)
+	if song.Lyrics.LyricsBody == g.rejectBody {
+		return false, g.reason
+	}
+	return true, ""
+}
 
 func (g *fakeGuard) Accept(song models.Song) (bool, string) {
 	g.calls = append(g.calls, song)
@@ -1821,12 +1853,20 @@ type fakeDetector struct {
 	version      string
 	err          error
 	calls        []string
+	// result, when its Version is non-empty, overrides the instrumental/version
+	// fields above and is returned verbatim - lets tests set the full telemetry
+	// (Confidence/VocalConfidence/SpeechConfidence/WinningVocalClass) without
+	// breaking existing tests that only set instrumental/version.
+	result detector.Result
 }
 
 func (d *fakeDetector) Detect(_ context.Context, audioPath string) (detector.Result, error) {
 	d.calls = append(d.calls, audioPath)
 	if d.err != nil {
 		return detector.Result{}, d.err
+	}
+	if d.result.Version != "" {
+		return d.result, nil
 	}
 	return detector.Result{Instrumental: d.instrumental, Version: d.version}, nil
 }
@@ -1972,9 +2012,13 @@ func TestRunOnceDetectorErrorTreatsAsMiss(t *testing.T) {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
-	// Detector error should be logged as a warning.
-	if !hasLog(*recs, slog.LevelWarn, "instrumental detection failed") {
-		t.Fatalf("logs = %+v; want a warning about instrumental detection failure", *recs)
+	// A detector error now surfaces as ErrLaneOutage and is logged by the
+	// orchestrator's detectorClassifier (not the worker) as a circuit-open
+	// warning, since the detector runs as a lane inside FindLyrics rather than
+	// via an inline worker call (#502). The item must still end up deferred, as
+	// asserted below.
+	if !hasLog(*recs, slog.LevelWarn, "lane circuit opened: detector outage; degrading to providers") {
+		t.Fatalf("logs = %+v; want a warning about the detector lane circuit opening", *recs)
 	}
 	// Item must be deferred (normal miss path).
 	if len(q.deferred) != 1 || q.deferred[0] != 202 {
@@ -2062,6 +2106,79 @@ func TestRunOnceDetectorInstrumentalWriteErrorDefersAsMiss(t *testing.T) {
 	if w.consecutiveFailures != 0 {
 		t.Fatalf("consecutiveFailures = %d; want 0", w.consecutiveFailures)
 	}
+	// A write failure must NOT leave a cached instrumental song behind: the cache
+	// store must happen only after the output marker writes succeed, else a
+	// deferred retry would hit the cache and complete without ever restoring
+	// instrumental_result or the detector telemetry (those are not serialized
+	// into the cached song).
+	if len(c.stores) != 0 {
+		t.Fatalf("cache stores = %d; want none (write failed; must not cache)", len(c.stores))
+	}
+}
+
+// TestRunOnceGuardInstalledWithOneProviderPlusDetector verifies the guard is
+// wired into the orchestrator's suitability check in the common
+// one-provider-plus-detector configuration, not just when there are multiple
+// provider lanes. w.lanes (the provider-only slice) has length 1 here; the
+// EFFECTIVE dispatch list (provider + detector) has length 2. Before the fix,
+// rebuildOrchestrator tested len(w.lanes) > 1 and never installed the guard in
+// this shape, so a guard-rejected provider result was accepted outright
+// instead of falling through to the demoted detector lane.
+func TestRunOnceGuardInstalledWithOneProviderPlusDetector(t *testing.T) {
+	track := models.Track{ArtistName: "Composer", TrackName: "Aria"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID: 206,
+		Inputs: models.Inputs{
+			Track:      track,
+			Outdir:     "out",
+			Filename:   "aria.lrc",
+			SourcePath: "/music/aria.flac",
+		},
+	}}}
+	c := &fakeCache{}
+	// The provider returns quality-OK (unsynced) lyrics that the guard rejects.
+	fetcher := &fakeFetcher{song: models.Song{
+		Track:  track,
+		Lyrics: models.Lyrics{LyricsBody: "wrong-language lyrics"},
+	}}
+	writer := &fakeWriter{}
+	// A real script guard only rejects lyric bodies dominated by a disallowed
+	// script; it has nothing to reject on the detector's textless instrumental
+	// result. Model that here: reject only the provider's wrong-language body,
+	// accept everything else (including the detector's empty-body song), so the
+	// test isolates the fall-through wiring rather than an unconditional guard.
+	guard := &selectiveGuard{rejectBody: "wrong-language lyrics", reason: "foreign-script share exceeds threshold"}
+	det := &fakeDetector{instrumental: true, version: "1.2.3"}
+
+	w := New(q, c, fetcher, writer)
+	w.EnableAudioDetector(det) // ordering defaults to demoted: provider first, detector fallback.
+	w.EnableGuard(guard)
+	w.SetInstrumentalDetectionDefault(true)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	// The guard must have been consulted on both the provider's result (rejected)
+	// and the detector's result (accepted): if it were never installed (the bug),
+	// it would be called zero times and the provider's rejected result would
+	// settle outright.
+	if len(guard.calls) != 2 {
+		t.Fatalf("guard calls = %d; want 2 (guard must be installed with one provider + detector)", len(guard.calls))
+	}
+	// A guard rejection must fall through to the demoted detector lane, not
+	// settle on the rejected provider result.
+	if len(det.calls) != 1 {
+		t.Fatalf("detector calls = %v; want 1 (guard rejection must fall through to the detector lane)", det.calls)
+	}
+	// The completed write must be the detector's instrumental settle, not the
+	// guard-rejected provider lyrics.
+	if len(writer.songs) != 1 || writer.songs[0].DetectorVersion != "1.2.3" {
+		t.Fatalf("written song DetectorVersion = %+v; want version 1.2.3 (detector fallback settle)", writer.songs)
+	}
+	if len(q.completed) != 1 || q.completed[0] != 206 {
+		t.Fatalf("completed = %v; want [206]", q.completed)
+	}
 }
 
 // TestRunOnceDetectorNotCalledOnSuccess verifies that the detector is NOT
@@ -2098,6 +2215,57 @@ func TestRunOnceDetectorNotCalledOnSuccess(t *testing.T) {
 	}
 	if len(q.completed) != 1 || q.completed[0] != 204 {
 		t.Fatalf("completed = %v; want [204]", q.completed)
+	}
+}
+
+// TestRunOnceDetectorFrontSettlesWithoutProviders verifies that with "front"
+// ordering, a gate-positive detector verdict settles the item without
+// consulting any provider lane, and that the full detector telemetry
+// round-trips through the stamp path.
+func TestRunOnceDetectorFrontSettlesWithoutProviders(t *testing.T) {
+	track := models.Track{ArtistName: "Artist", TrackName: "Title"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID: 400,
+		Inputs: models.Inputs{
+			Track: track, Outdir: "out", Filename: "artist-title.lrc",
+			SourcePath: "/music/x.flac",
+		},
+	}}}
+	cache := &fakeCache{}
+	fetcher := &fakeFetcher{}
+	writer := &fakeWriter{}
+	det := &fakeDetector{result: detector.Result{
+		Instrumental: true, Confidence: 0.9, VocalConfidence: 0.01,
+		SpeechConfidence: 0.02, WinningVocalClass: "Singing", Version: "1.5.0",
+	}}
+
+	w := New(q, cache, fetcher, writer)
+	w.EnableAudioDetector(det)
+	w.SetInstrumentalDetectionDefault(true)
+	w.SetDetectorOrdering("front")
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if fetcher.calls != 0 {
+		t.Fatalf("fetcher.calls = %d; want 0 (detector settled in front)", fetcher.calls)
+	}
+	if len(q.completed) != 1 || q.completed[0] != 400 {
+		t.Fatalf("completed = %v; want [400]", q.completed)
+	}
+	if len(q.instrumentalStamps) != 1 {
+		t.Fatalf("instrumentalStamps = %+v; want exactly one", q.instrumentalStamps)
+	}
+	got := q.instrumentalStamps[0]
+	if got.ID != 400 || got.Result != 1 {
+		t.Fatalf("stamp = %+v; want ID 400 result 1", got)
+	}
+	if got.Tel.DetectorVersion != "1.5.0" || got.Tel.MusicSum != 0.9 ||
+		got.Tel.VocalPeak != 0.01 || got.Tel.SpeechMean != 0.02 || got.Tel.VocalClass != "Singing" {
+		t.Fatalf("telemetry did not round-trip: %+v", got.Tel)
+	}
+	if q.outcomeTypes[400] != "instrumental" {
+		t.Fatalf("outcomeTypes[400] = %q; want instrumental", q.outcomeTypes[400])
 	}
 }
 
@@ -2514,5 +2682,21 @@ func TestLogIdleNamesTheCauseNotJustEmptiness(t *testing.T) {
 		if hasLog(*recs, slog.LevelDebug, "queue empty") {
 			t.Errorf("logIdle(%v) claimed \"queue empty\"; only errQueueEmpty may say that (#500)", err)
 		}
+	}
+}
+
+// TestRebuildOrchestrator_DetectorOrdering verifies SetDetectorOrdering places
+// the detector lane first ("front") or last (any other value, e.g. "demoted")
+// among the dispatch lanes.
+func TestRebuildOrchestrator_DetectorOrdering(t *testing.T) {
+	w := New(&fakeQueue{}, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
+	w.EnableAudioDetector(&fakeDetector{})
+	w.SetDetectorOrdering("front")
+	if got := w.orch.LaneNames(); len(got) == 0 || got[0] != "detector" {
+		t.Fatalf("front ordering: lanes = %v, want detector first", got)
+	}
+	w.SetDetectorOrdering("demoted")
+	if last := w.orch.LaneNames(); len(last) == 0 || last[len(last)-1] != "detector" {
+		t.Fatalf("demoted ordering: lanes = %v, want detector last", last)
 	}
 }
