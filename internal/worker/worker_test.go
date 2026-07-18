@@ -2874,3 +2874,54 @@ func TestDetectorInstrumentalRecordsHitAndLaneAttempts(t *testing.T) {
 		t.Fatalf("lane attempts for item 230 = %v; want the dispatch's per-lane attribution recorded", rec.attempts[230])
 	}
 }
+
+// TestAllLanesUnavailableConsultsDetectorLane verifies the pre-dequeue
+// availability gate tests the EFFECTIVE lane set, not w.lanes alone. w.lanes
+// tracks only the provider lanes, so once every provider breaker is open the
+// worker would idle even with a healthy detector lane that could still settle
+// items - worst under ordering=front, whose whole purpose is settling a
+// high-confidence instrumental with zero provider requests.
+func TestAllLanesUnavailableConsultsDetectorLane(t *testing.T) {
+	det := &fakeDetector{instrumental: true, version: "9.9.9"}
+	w := New(&fakeQueue{}, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
+	w.EnableAudioDetector(det)
+	w.SetInstrumentalDetectionDefault(true)
+	w.SetDetectorOrdering("front")
+
+	// Open every PROVIDER breaker. The detector lane's own breaker stays closed.
+	for _, l := range w.lanes {
+		l.Breaker().Trip()
+	}
+
+	if w.allLanesUnavailable() {
+		t.Fatal("worker must not idle while a healthy detector lane can still settle items")
+	}
+
+	// With the detector lane ALSO open, there is genuinely nothing to run.
+	w.detectorLane.Breaker().Trip()
+	if !w.allLanesUnavailable() {
+		t.Fatal("with every lane open, including the detector, the worker must idle")
+	}
+}
+
+// TestAllLanesUnavailableIgnoresDetectorUnderParallelMode confirms the gate does
+// not resurrect the detector under parallel dispatch, where rebuildOrchestrator
+// intentionally declines to install the lane. Without this, the availability fix
+// would quietly re-enable the racing behavior the parallel exclusion prevents.
+func TestAllLanesUnavailableIgnoresDetectorUnderParallelMode(t *testing.T) {
+	det := &fakeDetector{instrumental: true, version: "9.9.9"}
+	w := New(&fakeQueue{}, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
+	w.EnableAudioDetector(det)
+	w.SetInstrumentalDetectionDefault(true)
+	w.SetProvidersMode(orchestrator.ModeParallel)
+
+	if w.detectorLane != nil {
+		t.Fatal("no detector lane may be installed under parallel mode")
+	}
+	for _, l := range w.lanes {
+		l.Breaker().Trip()
+	}
+	if !w.allLanesUnavailable() {
+		t.Fatal("under parallel mode the gate must ignore the detector and idle on open provider breakers")
+	}
+}

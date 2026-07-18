@@ -195,6 +195,13 @@ type Worker struct {
 	// detector lane is inserted regardless of this value - the detector stays
 	// opt-in.
 	detectorOrdering string
+	// detectorLane is the detector lane actually installed by the most recent
+	// rebuildOrchestrator, or nil when none was (no audioDetector, or parallel
+	// mode). It is kept here ONLY so the pre-dequeue availability gate can
+	// consult the same live breaker the orchestrator uses; it is deliberately
+	// NOT part of w.lanes, which tracks provider lanes exclusively and which the
+	// circuit-config setters fan out across.
+	detectorLane *orchestrator.Lane
 }
 
 // errIdle marks a RunOnce outcome that unwinds the run loop without recording a
@@ -304,6 +311,7 @@ func (w *Worker) rebuildOrchestrator() error {
 		// is the real fix and is tracked in #528.
 		if w.mode != orchestrator.ModeOrdered {
 			slog.Warn("worker: instrumental detection is INACTIVE under parallel provider dispatch; the detector lane is not installed. Set providers.mode=ordered to enable it (see #528)", "mode", w.mode)
+			w.detectorLane = nil
 		} else {
 			cb := circuit.New(w.circuitBackoffBase, w.circuitOpenDuration)
 			cb.SetClock(w.now)
@@ -313,7 +321,10 @@ func (w *Worker) rebuildOrchestrator() error {
 			} else {
 				lanes = append(lanes, detLane)
 			}
+			w.detectorLane = detLane
 		}
+	} else {
+		w.detectorLane = nil
 	}
 	orch, err := orchestrator.New(w.mode, lanes...)
 	if err != nil {
@@ -479,7 +490,20 @@ func (w *Worker) setClock(now func() time.Time) {
 // worker should idle rather than dequeue. A lane whose window has elapsed
 // transitions to half-open (not open) here, so it is treated as available for a
 // probe. With a single lane this is identical to the prior primary-only gate.
+//
+// This must test the EFFECTIVE lane set, which is the provider lanes PLUS any
+// installed detector lane - not w.lanes alone. w.lanes deliberately tracks only
+// the provider lanes, so consulting it exclusively would idle the worker
+// whenever every provider breaker is open, even with a perfectly healthy
+// detector lane that could still settle items. That is worst under
+// ordering=front, whose entire purpose is settling a high-confidence
+// instrumental with zero provider requests: the detector would be unusable in
+// exactly the situation it is most valuable. The parallel-mode exclusion is
+// preserved for free, since rebuildOrchestrator leaves detectorLane nil there.
 func (w *Worker) allLanesUnavailable() bool {
+	if w.detectorLane != nil && w.detectorLane.Breaker().Allow() != circuit.StateOpen {
+		return false
+	}
 	for _, l := range w.lanes {
 		if l.Breaker().Allow() != circuit.StateOpen {
 			return false
