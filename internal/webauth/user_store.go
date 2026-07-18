@@ -55,6 +55,20 @@ type UserStore interface {
 	// credential rotation (#545); before it existed the only way to change an
 	// admin password was deleting the row from the database.
 	UpdatePasswordHash(ctx context.Context, username, passwordHash string) error
+	// RotateCredential replaces the password hash AND revokes every session for
+	// that user ATOMICALLY, returning the number of sessions revoked.
+	//
+	// The two writes must not be separable. Done sequentially, a failure of the
+	// revoke after a successful hash update leaves the new password active while
+	// sessions minted under the OLD password stay valid -- and the caller reports
+	// failure, so the operator believes neither happened. That is the exact state
+	// a rotation exists to prevent.
+	//
+	// It deliberately spans the users and sessions tables, which sit in the same
+	// database, rather than plumbing a transaction handle through both store
+	// interfaces. Atomicity here is a correctness requirement of rotation, not an
+	// implementation detail of either table.
+	RotateCredential(ctx context.Context, username, passwordHash string) (revoked int64, err error)
 }
 
 // SQLUserStore persists users in the SQLite `users` table.
@@ -188,6 +202,64 @@ func (s *SQLUserStore) UpdatePasswordHash(ctx context.Context, username, passwor
 		return ErrUserNotFound
 	}
 	return nil
+}
+
+// RotateCredential updates the password hash and deletes that user's sessions in
+// a single transaction, so the pair can never half-apply. See the interface doc
+// for why atomicity is a correctness requirement rather than a nicety.
+//
+// The session delete resolves the user by the same case-insensitive match as the
+// update, inside the transaction, so a concurrent rename cannot leave the two
+// statements acting on different rows.
+func (s *SQLUserStore) RotateCredential(ctx context.Context, username, passwordHash string) (int64, error) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return 0, fmt.Errorf("webauth: username must not be empty")
+	}
+	if passwordHash == "" {
+		return 0, fmt.Errorf("webauth: password hash must not be empty")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("webauth: rotate credential: begin: %w", err)
+	}
+	// Rollback is a no-op once the transaction has committed.
+	defer tx.Rollback() //nolint:errcheck // reason: no-op after commit; the commit error is what callers act on
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE username = ? COLLATE NOCASE`,
+		passwordHash, username,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("webauth: rotate credential: update hash: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("webauth: rotate credential: update rows: %w", err)
+	}
+	if n == 0 {
+		return 0, ErrUserNotFound
+	}
+
+	del, err := tx.ExecContext(ctx,
+		`DELETE FROM sessions WHERE user_id IN
+		 (SELECT id FROM users WHERE username = ? COLLATE NOCASE)`,
+		username,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("webauth: rotate credential: revoke sessions: %w", err)
+	}
+	revoked, err := del.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("webauth: rotate credential: revoke rows: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("webauth: rotate credential: commit: %w", err)
+	}
+	return revoked, nil
 }
 
 func (s *SQLUserStore) requireByID(ctx context.Context, id string) (User, error) {

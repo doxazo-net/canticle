@@ -33,7 +33,7 @@ func adminTestEnv(t *testing.T) (cfgPath, user string) {
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
-	defer sqlDB.Close() //nolint:errcheck // test cleanup
+	defer sqlDB.Close() //nolint:errcheck // reason: test cleanup
 
 	svc := webauth.NewService(webauth.NewSQLUserStore(sqlDB), webauth.NewSQLSessionStore(sqlDB))
 	if _, err := svc.Setup(ctx, "admin", adminSeedPassword); err != nil {

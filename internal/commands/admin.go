@@ -64,7 +64,7 @@ func runAdminSetPassword(ctx context.Context, out io.Writer, stdin io.Reader, ar
 		slog.Error("failed to open database", "error", err)
 		return 1
 	}
-	defer sqlDB.Close() //nolint:errcheck // best-effort close on shutdown
+	defer sqlDB.Close() //nolint:errcheck // reason: best-effort close on shutdown
 
 	svc := webauth.NewService(webauth.NewSQLUserStore(sqlDB), webauth.NewSQLSessionStore(sqlDB))
 	if err := svc.SetPassword(ctx, user, password); err != nil {
@@ -94,5 +94,11 @@ func readPasswordFromStdin(stdin io.Reader) (string, error) {
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", err
 	}
-	return strings.TrimRight(line, "\r\n"), nil
+	// Strip ONE line terminator, not every trailing \r and \n. TrimRight with a
+	// cutset would also eat a carriage return that is part of the password
+	// itself, which contradicts preserving password content exactly (the same
+	// reason leading and trailing spaces survive).
+	line = strings.TrimSuffix(line, "\n")
+	line = strings.TrimSuffix(line, "\r")
+	return line, nil
 }

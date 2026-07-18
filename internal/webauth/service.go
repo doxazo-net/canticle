@@ -123,12 +123,13 @@ func (s *Service) Setup(ctx context.Context, username, password string) (User, e
 // "skipped", and the OLD password still live. The only remaining route was
 // deleting the user row from the database.
 //
-// Sessions are revoked as part of the rotation. An operator changing a
-// compromised credential expects tokens minted under the old one to stop
-// working; leaving them valid until natural expiry would defeat the point. The
-// revoke is best-effort in ordering terms -- the hash is written first, so a
-// failure to clear sessions cannot leave the old password usable -- but its
-// error is returned so the caller learns the sessions outlived the change.
+// Sessions are revoked as part of the rotation, ATOMICALLY with the hash update.
+// An operator changing a compromised credential expects tokens minted under the
+// old one to stop working, and the two writes must not be separable: applying
+// the hash but failing the revoke would leave the new password active while old
+// sessions stayed valid, and the returned error would tell the operator that
+// nothing had happened. RotateCredential performs both in one transaction, so
+// the rotation either fully applies or leaves the account untouched.
 func (s *Service) SetPassword(ctx context.Context, username, password string) error {
 	username = strings.TrimSpace(username)
 	if username == "" {
@@ -137,22 +138,18 @@ func (s *Service) SetPassword(ctx context.Context, username, password string) er
 	if len(password) < MinPasswordLength {
 		return ErrPasswordTooShort
 	}
-	user, ok, err := s.users.GetByUsername(ctx, username)
-	if err != nil {
-		return fmt.Errorf("webauth: set password: %w", err)
-	}
-	if !ok {
-		return ErrUserNotFound
-	}
 	hash, err := HashPassword(password)
 	if err != nil {
 		return fmt.Errorf("webauth: set password: %w", err)
 	}
-	if err := s.users.UpdatePasswordHash(ctx, username, hash); err != nil {
+	// RotateCredential reports ErrUserNotFound itself (its UPDATE matches zero
+	// rows), so no separate existence check is needed -- and a check-then-write
+	// pair would reintroduce a race the single transaction closes.
+	if _, err := s.users.RotateCredential(ctx, username, hash); err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return ErrUserNotFound
+		}
 		return fmt.Errorf("webauth: set password: %w", err)
-	}
-	if _, err := s.sessions.DeleteSessionsForUser(ctx, user.ID); err != nil {
-		return fmt.Errorf("webauth: set password: revoke sessions: %w", err)
 	}
 	return nil
 }

@@ -34,9 +34,15 @@ func (s rotationStore) HasUsers(context.Context) (bool, error) { return true, ni
 func (s rotationStore) UpdatePasswordHash(context.Context, string, string) error {
 	return s.updateErr
 }
+func (s rotationStore) RotateCredential(context.Context, string, string) (int64, error) {
+	if s.lookupErr != nil {
+		return 0, s.lookupErr
+	}
+	return 0, s.updateErr
+}
 
-// okSessionStore succeeds at everything except, optionally, the revoke.
-type okSessionStore struct{ revokeErr error }
+// okSessionStore succeeds at everything.
+type okSessionStore struct{}
 
 func (okSessionStore) CreateSession(context.Context, string, time.Time) (string, error) {
 	return "token", nil
@@ -46,8 +52,8 @@ func (okSessionStore) GetSessionByToken(context.Context, string) (Session, bool,
 }
 func (okSessionStore) DeleteSession(context.Context, string) error         { return nil }
 func (okSessionStore) CleanExpiredSessions(context.Context) (int64, error) { return 0, nil }
-func (s okSessionStore) DeleteSessionsForUser(context.Context, string) (int64, error) {
-	return 0, s.revokeErr
+func (okSessionStore) DeleteSessionsForUser(context.Context, string) (int64, error) {
+	return 0, nil
 }
 
 func TestSetPassword_LookupFailurePropagates(t *testing.T) {
@@ -70,16 +76,69 @@ func TestSetPassword_WriteFailurePropagates(t *testing.T) {
 	}
 }
 
-// A failed session revoke must be reported, not swallowed. The hash is already
-// written at that point, so the new password works -- but the operator needs to
-// know that sessions minted under the old one may still be live, which is
-// exactly the thing a rotation is meant to end.
-func TestSetPassword_RevokeFailureIsReported(t *testing.T) {
-	sentinel := errors.New("revoke failed")
-	svc := NewService(rotationStore{user: User{ID: "u1"}}, okSessionStore{revokeErr: sentinel})
+// Rotation is atomic, so a failure cannot half-apply. Exercised against a real
+// database: a rotation naming an unknown user must leave an EXISTING user's
+// credential and sessions completely untouched. If the UPDATE and DELETE were
+// separable, a mistargeted rotation could still clear sessions.
+func TestRotateCredential_FailureLeavesEverythingUntouched(t *testing.T) {
+	svc, db := newTestService(t)
+	users := NewSQLUserStore(db)
+	sessions := NewSQLSessionStore(db)
+	ctx := context.Background()
 
-	err := svc.SetPassword(context.Background(), "admin", "a-new-password")
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("err = %v; want the revoke failure surfaced", err)
+	if _, err := svc.Setup(ctx, "admin", "initial-password"); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	before, _, err := users.GetByUsername(ctx, "admin")
+	if err != nil {
+		t.Fatalf("GetByUsername: %v", err)
+	}
+	if _, err := sessions.CreateSession(ctx, before.ID, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	if _, err := users.RotateCredential(ctx, "nobody", "$argon2id$other"); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("err = %v; want ErrUserNotFound", err)
+	}
+
+	after, ok, err := users.GetByUsername(ctx, "admin")
+	if err != nil || !ok {
+		t.Fatalf("GetByUsername after: ok=%v err=%v", ok, err)
+	}
+	if after.PasswordHash != before.PasswordHash {
+		t.Error("an unrelated user's password hash changed during a failed rotation")
+	}
+	if _, err := svc.Login(ctx, "admin", "initial-password"); err != nil {
+		t.Fatalf("existing credential broken by a failed rotation: %v", err)
+	}
+}
+
+// A successful rotation reports how many sessions it revoked, so a caller can
+// tell the operator that existing logins are actually dead.
+func TestRotateCredential_ReportsRevokedCount(t *testing.T) {
+	svc, db := newTestService(t)
+	users := NewSQLUserStore(db)
+	sessions := NewSQLSessionStore(db)
+	ctx := context.Background()
+
+	if _, err := svc.Setup(ctx, "admin", "initial-password"); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	u, _, err := users.GetByUsername(ctx, "admin")
+	if err != nil {
+		t.Fatalf("GetByUsername: %v", err)
+	}
+	for range 2 {
+		if _, err := sessions.CreateSession(ctx, u.ID, time.Now().Add(time.Hour)); err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+	}
+
+	revoked, err := users.RotateCredential(ctx, "admin", "$argon2id$rotated")
+	if err != nil {
+		t.Fatalf("RotateCredential: %v", err)
+	}
+	if revoked != 2 {
+		t.Errorf("revoked = %d; want 2", revoked)
 	}
 }

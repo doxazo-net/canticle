@@ -67,6 +67,9 @@ func (failingUserStore) HasUsers(context.Context) (bool, error) { return false, 
 func (failingUserStore) UpdatePasswordHash(context.Context, string, string) error {
 	return errStore
 }
+func (failingUserStore) RotateCredential(context.Context, string, string) (int64, error) {
+	return 0, errStore
+}
 
 type failingSessionStore struct{}
 
@@ -123,6 +126,9 @@ func (s okUserStore) GetByUsername(context.Context, string) (User, bool, error) 
 func (s okUserStore) GetByID(context.Context, string) (User, bool, error)      { return s.user, true, nil }
 func (s okUserStore) HasUsers(context.Context) (bool, error)                   { return true, nil }
 func (s okUserStore) UpdatePasswordHash(context.Context, string, string) error { return nil }
+func (s okUserStore) RotateCredential(context.Context, string, string) (int64, error) {
+	return 0, nil
+}
 
 func TestServiceLoginSessionCreateError(t *testing.T) {
 	ctx := context.Background()
