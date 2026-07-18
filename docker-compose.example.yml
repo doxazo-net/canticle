@@ -18,6 +18,10 @@ services:
       # Supply MXLRC_WEBAUTH_ADMIN_PASSWORD from an uncommitted .env file -- never hardcode it here.
       # MXLRC_WEBAUTH_ADMIN_USER: "admin"
       # MXLRC_WEBAUTH_ADMIN_PASSWORD: "${MXLRC_WEBAUTH_ADMIN_PASSWORD}"
+      # Optional: enable the instrumental-detection sidecar defined below. Both
+      # are needed -- the detector stays off unless explicitly enabled.
+      # MXLRC_INSTRUMENTAL_DETECTOR_ENABLED: "true"
+      # MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL: "http://yamnet:8080"
       PUID: "99"
       PGID: "100"
       MUSIXMATCH_TOKEN: "${MUSIXMATCH_TOKEN}"
@@ -34,6 +38,46 @@ services:
     volumes:
       - canticle-config:/config
       - /path/to/your/data:/data:rw
+
+  # Optional instrumental-detection sidecar. Canticle POSTs a 16 kHz mono WAV to
+  # http://yamnet:8080/classify and uses the AudioSet scores to decide whether to
+  # write an instrumental marker. Omit this service to run without detection --
+  # the detector is strictly opt-in and Canticle degrades cleanly without it.
+  #
+  # There is no published image yet (see issue #498), so this builds from the
+  # vendored source under deploy/yamnet-detector/.
+  yamnet:
+    build:
+      context: ./deploy/yamnet-detector
+    image: canticle-yamnet:local
+    container_name: canticle-yamnet
+    restart: unless-stopped
+    # No published port: Canticle reaches it by service name on the shared
+    # compose network. Do not expose it -- the endpoint is unauthenticated.
+    expose:
+      - "8080"
+    deploy:
+      resources:
+        limits:
+          # TensorFlow parallelizes a forward pass across every core it can see,
+          # so an uncapped sidecar will happily consume the whole host during a
+          # scan and starve everything else on it. Cap it.
+          #
+          # 4 CPUs is a deliberately conservative default that keeps the sidecar
+          # a good neighbor on a modest host. Inference is the dominant cost in
+          # the detector path (measured at ~40-67s per track), so this limit
+          # trades detector throughput for isolation: raise it on a host with
+          # cores to spare, lower it on a busy one.
+          cpus: "4"
+          # The SavedModel plus the TF runtime sit around 1.5GB resident.
+          memory: 4G
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # The model is loaded at startup, so the first probe must not race it.
+      start_period: 60s
 
 volumes:
   canticle-config:
