@@ -262,18 +262,20 @@ Bootstrap behavior:
 Use `canticle admin set-password`. This is the only supported way to change an existing admin password: there is no password-change screen in the web UI yet (tracked in issue #545), and editing the bootstrap environment variable does nothing once an admin exists.
 
 ```sh
-printf '%s' 'your-new-password' | canticle admin set-password --user admin
+canticle admin set-password --user admin < newpass.txt
 ```
 
-In Docker or Unraid, run it inside the running container:
+In Docker or Unraid, run it inside the running container, piping the password in from the host so it never appears in the `docker exec` arguments:
 
 ```sh
-docker exec -i canticle sh -c 'printf "%s" "your-new-password" | canticle admin set-password --user admin'
+docker exec -i canticle canticle admin set-password --user admin < newpass.txt
 ```
+
+Do **not** embed the password in the command itself (for example inside `sh -c '... printf "your-password" ...'`). Anything on the command line is visible in the host's process list to every other user on the machine, and lands in your shell history, which are exactly the channels reading from stdin avoids.
 
 Notes on how it behaves:
 
-- **The password is read from standard input, never a flag.** A `--password` flag would place the credential in your shell history and in the host's process list, where any other user on the machine can read it. Piping keeps it out of both. Prefer reading from a file (`canticle admin set-password --user admin < newpass.txt`) or a secret manager over typing it inline, since an inline `printf` still lands in shell history.
+- **The password is read from standard input, never a flag.** A `--password` flag would place the credential in your shell history and in the host's process list, where any other user on the machine can read it. Read it from a file or a secret manager. Typing it inline (`printf '%s' 'pw' | ...`) keeps it off the process list but still records it in shell history, so treat that as a last resort and clear the entry afterwards. This mirrors `canticle secrets set`, which rejects a value passed on the command line for the same reason.
 - **A trailing newline is stripped**, so the usual `echo` and heredoc forms behave as expected. Leading and trailing spaces are preserved, because they may be part of the passphrase.
 - **Existing sessions are revoked.** Anyone signed in with the old password is signed out immediately. That is the point of rotating a compromised credential, and it means you will need to sign in again yourself.
 - **The change is atomic.** The password update and the session revocation happen in one database transaction, so a rotation either fully applies or leaves the account untouched. It cannot half-apply.
