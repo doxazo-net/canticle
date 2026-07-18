@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/sydlexius/canticle/internal/circuit"
@@ -32,7 +33,10 @@ func NewDetectorLane(d detector.Detector, breaker *circuit.Breaker) *Lane {
 			}
 			res, err := d.Detect(ctx, sourcePath)
 			if err != nil {
-				return models.Song{}, fmt.Errorf("%w: %v", ErrLaneOutage, err)
+				// Join rather than %v so BOTH the sentinel and the detector's own
+				// cause stay matchable with errors.Is: the classifier keys on
+				// ErrLaneOutage, while callers and logs need the underlying failure.
+				return models.Song{}, fmt.Errorf("detector request failed: %w", errors.Join(ErrLaneOutage, err))
 			}
 			if !res.Instrumental {
 				return models.Song{}, ErrLaneBenignMiss

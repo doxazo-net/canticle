@@ -115,6 +115,7 @@ type fakeQueue struct {
 	retireErr          error
 	setProviderLaneErr error
 	instrumentalStamps []instrumentalStamp
+	instrumentalErr    error
 }
 
 func (q *fakeQueue) Dequeue(_ context.Context) (queue.WorkItem, error) {
@@ -185,6 +186,9 @@ type instrumentalStamp struct {
 }
 
 func (q *fakeQueue) SetInstrumentalResult(_ context.Context, id int64, result int, tel queue.InstrumentalTelemetry) error {
+	if q.instrumentalErr != nil {
+		return q.instrumentalErr
+	}
 	q.instrumentalStamps = append(q.instrumentalStamps, instrumentalStamp{ID: id, Result: result, Tel: tel})
 	return nil
 }
@@ -1927,12 +1931,13 @@ func TestRunOnceDetectorInstrumentalWritesMarkerAndCompletes(t *testing.T) {
 			return "<no song captured>"
 		}())
 	}
-	// Cache must have stored the encoded instrumental song.
-	if len(c.stores) != 1 {
-		t.Fatalf("cache stores = %d; want 1 (instrumental encoded result stored)", len(c.stores))
-	}
-	if c.stores[0].artist != "Composer" || c.stores[0].title != "Interlude" {
-		t.Fatalf("cache store key = %+v; want Composer/Interlude", c.stores[0])
+	// A detector-sourced instrumental must NOT be cached. WinningLane and the
+	// whole Detector* telemetry block carry `json:"-"`, so a stored entry would
+	// decode as a bare Instrumental=1 song: a later cache hit would write the
+	// marker but stamp no instrumental_result and no provenance, permanently,
+	// for every track sharing this artist/track/duration key.
+	if len(c.stores) != 0 {
+		t.Fatalf("cache stores = %d; want 0 (a detector verdict is not replayable through the cache, so it must not be stored)", len(c.stores))
 	}
 	// Consecutive failure counter must remain 0.
 	if w.consecutiveFailures != 0 {
@@ -2698,5 +2703,174 @@ func TestRebuildOrchestrator_DetectorOrdering(t *testing.T) {
 	w.SetDetectorOrdering("demoted")
 	if last := w.orch.LaneNames(); len(last) == 0 || last[len(last)-1] != "detector" {
 		t.Fatalf("demoted ordering: lanes = %v, want detector last", last)
+	}
+}
+
+// TestRebuildOrchestratorSkipsDetectorLaneUnderParallelMode verifies that the
+// detector lane is NOT installed when providers.mode=parallel. Under parallel
+// dispatch every lane races, so a fast gate-positive detector verdict can be
+// held as the winning result before a slower provider answers - which would let
+// a lyrical track settle as instrumental. Detection is therefore left inactive
+// under parallel (staged dispatch is tracked in #528). Asserted through
+// observable behavior: the detector must never be invoked, and the item must
+// take the ordinary deferred-miss path instead of being completed as
+// instrumental.
+func TestRebuildOrchestratorSkipsDetectorLaneUnderParallelMode(t *testing.T) {
+	track := models.Track{ArtistName: "Composer", TrackName: "Interlude"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID: 210,
+		Inputs: models.Inputs{
+			Track:      track,
+			Outdir:     "out",
+			Filename:   "interlude.lrc",
+			SourcePath: "/music/interlude.flac",
+		},
+	}}}
+	writer := &fakeWriter{}
+	det := &fakeDetector{instrumental: true, version: "9.9.9"}
+
+	w := New(q, &fakeCache{}, &fakeFetcher{err: musixmatch.ErrNotFound}, writer)
+	w.EnableAudioDetector(det)
+	w.SetInstrumentalDetectionDefault(true)
+	w.SetProvidersMode(orchestrator.ModeParallel)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	if len(det.calls) != 0 {
+		t.Fatalf("detector calls = %v; want none (the detector lane must not be installed under parallel mode)", det.calls)
+	}
+	if len(q.completed) != 0 {
+		t.Fatalf("completed = %v; want none (with detection inactive the item is an ordinary miss)", q.completed)
+	}
+	if len(q.deferred) != 1 {
+		t.Fatalf("deferred = %v; want the item deferred as a normal miss", q.deferred)
+	}
+	if len(writer.writes) != 0 {
+		t.Fatalf("writes = %v; want none (no instrumental marker without a detector verdict)", writer.writes)
+	}
+}
+
+// TestRebuildOrchestratorInstallsDetectorLaneUnderOrderedMode is the positive
+// counterpart to the parallel case above: the same configuration under ordered
+// mode MUST install the lane and settle the track as instrumental. Without this
+// pair, the parallel test would also pass if the detector lane were broken
+// outright.
+func TestRebuildOrchestratorInstallsDetectorLaneUnderOrderedMode(t *testing.T) {
+	track := models.Track{ArtistName: "Composer", TrackName: "Interlude"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID: 211,
+		Inputs: models.Inputs{
+			Track:      track,
+			Outdir:     "out",
+			Filename:   "interlude.lrc",
+			SourcePath: "/music/interlude.flac",
+		},
+	}}}
+	writer := &fakeWriter{}
+	det := &fakeDetector{instrumental: true, version: "9.9.9"}
+
+	w := New(q, &fakeCache{}, &fakeFetcher{err: musixmatch.ErrNotFound}, writer)
+	w.EnableAudioDetector(det)
+	w.SetInstrumentalDetectionDefault(true)
+	w.SetProvidersMode(orchestrator.ModeOrdered)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	if len(det.calls) != 1 {
+		t.Fatalf("detector calls = %v; want exactly one under ordered mode", det.calls)
+	}
+	if len(q.completed) != 1 || q.completed[0] != 211 {
+		t.Fatalf("completed = %v; want [211] settled as instrumental", q.completed)
+	}
+}
+
+// TestDetectorInstrumentalStampFailureDefersInsteadOfCompleting verifies that a
+// failure to stamp instrumental_result is FATAL to the settle. Completing the
+// row without the stamp would retire the work item while leaving no record that
+// the detector settled it - unauditable, unreproducible, and never revisited by
+// a later pass. The item must be deferred for retry instead.
+func TestDetectorInstrumentalStampFailureDefersInsteadOfCompleting(t *testing.T) {
+	track := models.Track{ArtistName: "Composer", TrackName: "Interlude"}
+	q := &fakeQueue{
+		items: []queue.WorkItem{{
+			ID: 220,
+			Inputs: models.Inputs{
+				Track:      track,
+				Outdir:     "out",
+				Filename:   "interlude.lrc",
+				SourcePath: "/music/interlude.flac",
+			},
+		}},
+		instrumentalErr: errors.New("db: disk I/O error"),
+	}
+	writer := &fakeWriter{}
+	det := &fakeDetector{instrumental: true, version: "9.9.9"}
+
+	w := New(q, &fakeCache{}, &fakeFetcher{err: musixmatch.ErrNotFound}, writer)
+	w.EnableAudioDetector(det)
+	w.SetInstrumentalDetectionDefault(true)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	if len(q.completed) != 0 {
+		t.Fatalf("completed = %v; want none (a failed stamp must not complete the row)", q.completed)
+	}
+	if len(q.deferred) != 1 || q.deferred[0] != 220 {
+		t.Fatalf("deferred = %v; want [220] deferred for retry after the stamp failure", q.deferred)
+	}
+	// The marker write already happened and WriteLRC is idempotent, so the retry
+	// re-runs it harmlessly; the write is not rolled back.
+	if len(writer.writes) != 1 {
+		t.Fatalf("writes = %v; want the marker write to have happened before the stamp", writer.writes)
+	}
+	if w.consecutiveFailures != 0 {
+		t.Fatalf("consecutiveFailures = %d; want 0 (a stamp failure is a deferral, not a provider failure)", w.consecutiveFailures)
+	}
+}
+
+// TestDetectorInstrumentalRecordsHitAndLaneAttempts verifies that a detector
+// settle records the same fetch bookkeeping an ordinary provider settle does.
+// The detector completion path returns early, so without an explicit record the
+// provider_outcomes counter would undercount and lane_attempts would have no row
+// for this track at all - skewing the per-track hit-rate reports (#282) by
+// exactly the set of tracks the detector resolves.
+func TestDetectorInstrumentalRecordsHitAndLaneAttempts(t *testing.T) {
+	track := models.Track{ArtistName: "Composer", TrackName: "Interlude"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID: 230,
+		Inputs: models.Inputs{
+			Track:      track,
+			Outdir:     "out",
+			Filename:   "interlude.lrc",
+			SourcePath: "/music/interlude.flac",
+		},
+	}}}
+	rec := &fakeProviderRecorder{}
+	det := &fakeDetector{instrumental: true, version: "9.9.9"}
+
+	w := New(q, &fakeCache{}, &fakeFetcher{err: musixmatch.ErrNotFound}, &fakeWriter{})
+	w.EnableAudioDetector(det)
+	w.SetInstrumentalDetectionDefault(true)
+	w.SetProviderRecorder(rec)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	if len(q.completed) != 1 {
+		t.Fatalf("completed = %v; want the item settled as instrumental", q.completed)
+	}
+	// The hit must be attributed to the detector lane, matching song.WinningLane.
+	if len(rec.hits) != 1 || rec.hits[0] != "detector" {
+		t.Fatalf("provider hits = %v; want exactly [detector]", rec.hits)
+	}
+	if len(rec.attempts[230]) == 0 {
+		t.Fatalf("lane attempts for item 230 = %v; want the dispatch's per-lane attribution recorded", rec.attempts[230])
 	}
 }

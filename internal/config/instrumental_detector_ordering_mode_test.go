@@ -31,9 +31,9 @@ func TestValidateInstrumentalDetectorOrdering(t *testing.T) {
 			cfg := defaults()
 			cfg.InstrumentalDetector.Ordering = c.ordering
 			cfg.Providers.Mode = c.mode
-			err := validateInstrumentalDetectorOrdering(cfg)
+			err := ValidateInstrumentalDetectorOrdering(cfg)
 			if (err != nil) != c.wantErr {
-				t.Fatalf("validateInstrumentalDetectorOrdering(ordering=%q, mode=%q) err=%v, wantErr=%v", c.ordering, c.mode, err, c.wantErr)
+				t.Fatalf("ValidateInstrumentalDetectorOrdering(ordering=%q, mode=%q) err=%v, wantErr=%v", c.ordering, c.mode, err, c.wantErr)
 			}
 		})
 	}
@@ -47,9 +47,9 @@ func TestValidateInstrumentalDetectorOrdering_ErrorNamesBothKeys(t *testing.T) {
 	cfg.InstrumentalDetector.Ordering = detectorOrderingFront
 	cfg.Providers.Mode = providersModeParallel
 
-	err := validateInstrumentalDetectorOrdering(cfg)
+	err := ValidateInstrumentalDetectorOrdering(cfg)
 	if err == nil {
-		t.Fatal("validateInstrumentalDetectorOrdering(front, parallel) = nil, want an error")
+		t.Fatal("ValidateInstrumentalDetectorOrdering(front, parallel) = nil, want an error")
 	}
 	msg := err.Error()
 	if !strings.Contains(msg, "instrumental_detector.ordering") {

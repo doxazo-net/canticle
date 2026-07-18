@@ -44,6 +44,17 @@ const (
 	// (not with the throttle signals below) because it must take the same
 	// bounded-retry path as a clean miss -- see #496.
 	OutcomeBenignMiss
+	// OutcomeLaneOutage means a NON-PROVIDER lane (today: the detector) reached
+	// for its backend and the call genuinely failed (ErrLaneOutage). It ranks
+	// above a benign miss - we did not cleanly learn anything from that lane -
+	// but deliberately BELOW OutcomeTransport, because such a lane answers a
+	// different question than the providers do. A detector outage says nothing
+	// about whether the track has lyrics, so it must never outrank, or tie and
+	// then mask, a provider's own transport failure: at equal precedence rankErr
+	// keeps whichever lane reported FIRST, so a front-ordered detector outage
+	// would otherwise become the surfaced error and let the worker downgrade a
+	// genuine provider failure to a benign miss, suppressing its backoff.
+	OutcomeLaneOutage
 	// OutcomeTransport means a retriable failure that is not a clean miss
 	// (timeout, connection failure, an unexpected error).
 	OutcomeTransport
@@ -78,6 +89,8 @@ func ClassifyOutcome(err error) OutcomeClass {
 	case musixmatch.IsBenignMiss(err), errors.Is(err, musixmatch.ErrTruncatedResponse),
 		errors.Is(err, ErrLaneBenignMiss):
 		return OutcomeBenignMiss
+	case errors.Is(err, ErrLaneOutage):
+		return OutcomeLaneOutage
 	default:
 		return OutcomeTransport
 	}
@@ -93,12 +106,14 @@ func (c OutcomeClass) precedence() int {
 		return 0
 	case OutcomeBenignMiss:
 		return 1
-	case OutcomeTransport:
+	case OutcomeLaneOutage:
 		return 2
+	case OutcomeTransport:
+		return 3
 	case OutcomeAuthRateLimit:
-		return 3
+		return 4
 	case OutcomeUnavailable:
-		return 3
+		return 4
 	default:
 		return 0
 	}

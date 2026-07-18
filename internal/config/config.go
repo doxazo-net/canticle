@@ -809,7 +809,7 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 	if err := validateServerTLS(cfg); err != nil {
 		return cfg, appliedEnv, err
 	}
-	if err := validateInstrumentalDetectorOrdering(cfg); err != nil {
+	if err := ValidateInstrumentalDetectorOrdering(cfg); err != nil {
 		return cfg, appliedEnv, err
 	}
 	if cfg.DB.Path == "" {
@@ -1505,7 +1505,7 @@ func validateServerTLS(cfg Config) error {
 	return nil
 }
 
-// validateInstrumentalDetectorOrdering fails fast on a contradictory
+// ValidateInstrumentalDetectorOrdering fails fast on a contradictory
 // combination of instrumental_detector.ordering="front" and
 // providers.mode="parallel". "front" exists to let a high-confidence
 // instrumental verdict settle a track with zero provider requests, which only
@@ -1520,7 +1520,7 @@ func validateServerTLS(cfg Config) error {
 // load so the failure is a clear startup error rather than a silent
 // no-op. Validation happens after both TOML and env overrides are resolved,
 // so it fires regardless of which source set either value.
-func validateInstrumentalDetectorOrdering(cfg Config) error {
+func ValidateInstrumentalDetectorOrdering(cfg Config) error {
 	if cfg.InstrumentalDetector.Ordering == detectorOrderingFront && cfg.Providers.Mode == providersModeParallel {
 		return fmt.Errorf("config: instrumental_detector.ordering=front requires providers.mode=ordered: " +
 			"providers.mode=parallel dispatches all lanes concurrently, so a detector-first ordering cannot " +

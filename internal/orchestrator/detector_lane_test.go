@@ -15,9 +15,15 @@ type stubDetector struct {
 	res detector.Result
 	err error
 	got string
+	// calls counts Detect invocations. It exists because got alone cannot prove
+	// Detect was NOT called: got starts empty, so a skipped call and a call made
+	// with an empty path are indistinguishable by got - both leave it "". Only a
+	// counter separates them.
+	calls int
 }
 
 func (s *stubDetector) Detect(_ context.Context, audioPath string) (detector.Result, error) {
+	s.calls++
 	s.got = audioPath
 	return s.res, s.err
 }
@@ -63,8 +69,8 @@ func TestDetectorLane_EmptyPathIsBenignMiss(t *testing.T) {
 	if ClassifyOutcome(err) != OutcomeBenignMiss {
 		t.Fatalf("empty-path outcome = %v, want OutcomeBenignMiss", ClassifyOutcome(err))
 	}
-	if d.got != "" {
-		t.Fatal("detector must not be called with an empty path")
+	if d.calls != 0 {
+		t.Fatalf("detector must not be invoked at all for an empty path, got %d calls", d.calls)
 	}
 }
 
@@ -94,8 +100,8 @@ func TestDetectorLane_OutageTripsBreaker(t *testing.T) {
 	br := circuit.New(time.Minute, time.Hour)
 	lane := NewDetectorLane(d, br)
 	_, err := lane.FindLyrics(context.Background(), models.Track{}, "/music/x.flac")
-	if ClassifyOutcome(err) != OutcomeTransport {
-		t.Fatalf("outage outcome = %v, want OutcomeTransport", ClassifyOutcome(err))
+	if ClassifyOutcome(err) != OutcomeLaneOutage {
+		t.Fatalf("outage outcome = %v, want OutcomeLaneOutage", ClassifyOutcome(err))
 	}
 	if !errors.Is(err, ErrLaneOutage) {
 		t.Fatalf("outage error must wrap ErrLaneOutage: %v", err)

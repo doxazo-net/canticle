@@ -2319,6 +2319,20 @@ func runConfig(out io.Writer, args ConfigCmd) int {
 			_, _ = fmt.Fprintln(out, err)
 			return 2
 		}
+		// Re-check the cross-field invariants against the MERGED config before
+		// persisting. setConfigValue validates one key in isolation, but
+		// instrumental_detector.ordering and providers.mode are separately
+		// settable and only contradict each other in combination: setting either
+		// one alone can move the file into the rejected front+parallel state,
+		// which load-time validation would then fail on at the NEXT startup -
+		// after the write, so the operator gets a broken config file and a
+		// delayed, confusing boot error rather than an immediate rejection. This
+		// is the same share-one-validator arrangement ValidateTLSSelection uses
+		// across boot and the settings-save path.
+		if err := config.ValidateInstrumentalDetectorOrdering(cfg); err != nil {
+			_, _ = fmt.Fprintln(out, err)
+			return 2
+		}
 		if path == "" {
 			path = defaultConfigPath()
 		}
