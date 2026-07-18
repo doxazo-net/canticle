@@ -35,6 +35,21 @@ with `tf.saved_model.load` -- `tensorflow-hub` is deliberately not a dependency
 docker build -t canticle-yamnet:local .
 ```
 
+### Resource limits (cap this container)
+
+TensorFlow parallelizes a forward pass across every core it can see, so an
+uncapped sidecar will consume the whole host during a library scan and starve
+everything else running on it. `docker-compose.example.yml` therefore ships a
+`deploy.resources.limits` block with a conservative `cpus: "4"` and `memory: 4G`
+(the SavedModel plus the TF runtime sit around 1.5GB resident).
+
+Treat 4 as a floor for good-neighbor behavior, not a performance target.
+Inference is the dominant cost in the detector path, so this limit trades
+detector throughput for isolation: raise it on a host with cores to spare, lower
+it on a busy one. Nothing breaks either way -- a slower sidecar just means a
+longer per-track detection, and Canticle's own detector cooldown and circuit
+breaker already bound how hard it is driven.
+
 The deployed copy lives on the Unraid host at
 `/mnt/vms/dockerappdata/yamnet-detector/`; Canticle reaches it at
 `http://yamnet:8080` on the shared compose network.
