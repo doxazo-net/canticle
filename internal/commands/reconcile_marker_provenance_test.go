@@ -305,6 +305,69 @@ func TestRunReconcileMarkerProvenance_BackupFileContainsStampedPath(t *testing.T
 	}
 }
 
+// TestRunReconcileMarkerProvenance_UnreadableMarkerErrorsNonZero verifies a
+// marker path that exists but cannot be read (here a directory occupying the
+// .txt slot, which Lstat sees as a non-symlink but ReadInstrumentalProvenance
+// fails to scan) is counted as errored and forces a non-zero exit -- a real
+// read failure must not be silently swallowed behind exit 0.
+func TestRunReconcileMarkerProvenance_UnreadableMarkerErrorsNonZero(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	outdir := filepath.Join(dir, "music")
+	if err := os.MkdirAll(outdir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cfgPath := filepath.Join(dir, "config.toml")
+	writeMarkerProvCfg(t, cfgPath, dbPath)
+	seedDetectorMarkerRow(t, ctx, dbPath, outdir, "unreadable", "1.5.0", false)
+
+	// A directory in the marker's .txt slot: Lstat succeeds (not a symlink) but
+	// reading it as an LRC file fails (EISDIR on scan).
+	if err := os.MkdirAll(filepath.Join(outdir, "unreadable.txt"), 0o755); err != nil {
+		t.Fatalf("mkdir marker slot: %v", err)
+	}
+
+	var out bytes.Buffer
+	code := runReconcileMarkerProvenance(ctx, &out, ScanReconcileMarkerProvenanceCmd{ConfigPath: cfgPath})
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 for an unreadable marker: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "errored 1") {
+		t.Errorf("summary must report 'errored 1' for an unreadable marker:\n%s", out.String())
+	}
+}
+
+// TestRunReconcileMarkerProvenance_LstatErrorErrorsNonZero verifies a marker
+// path whose Lstat fails for a reason other than "absent" (here ENOTDIR: a
+// regular file sits where the marker's parent directory is expected) is counted
+// as errored and forces a non-zero exit -- only os.ErrNotExist is the benign
+// skip case.
+func TestRunReconcileMarkerProvenance_LstatErrorErrorsNonZero(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	cfgPath := filepath.Join(dir, "config.toml")
+	writeMarkerProvCfg(t, cfgPath, dbPath)
+
+	// A regular file standing in for the marker's parent directory: Lstat of
+	// blocker/song.txt fails with ENOTDIR (not ErrNotExist, not a symlink).
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	seedDetectorMarkerRow(t, ctx, dbPath, blocker, "song", "1.5.0", false)
+
+	var out bytes.Buffer
+	code := runReconcileMarkerProvenance(ctx, &out, ScanReconcileMarkerProvenanceCmd{ConfigPath: cfgPath})
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 for a non-absent lstat failure: %s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "errored 1") {
+		t.Errorf("summary must report 'errored 1' for an lstat failure:\n%s", out.String())
+	}
+}
+
 // TestRunScanCmd_DispatchesReconcileMarkerProvenance verifies the scan
 // subcommand switch routes to runReconcileMarkerProvenance, both with an
 // explicit sub-config and with the parent --config inherited (mirrors

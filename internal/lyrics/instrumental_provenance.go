@@ -77,7 +77,7 @@ func WriteMarkerProvenance(path string, prov InstrumentalProvenance) (changed bo
 	}
 	existing, isMarker, err := ReadInstrumentalProvenance(path)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("read marker provenance %s: %w", path, err)
 	}
 	if !isMarker || existing.Source != "" {
 		return false, nil

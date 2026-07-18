@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -79,13 +80,40 @@ func runReconcileMarkerProvenance(ctx context.Context, out io.Writer, args ScanR
 	var stamped, skipped, errored int
 	for _, r := range rows {
 		for _, p := range instrumentalbackfill.MarkerPaths(r.Inputs) {
+			// Match WriteMarkerProvenance's eligibility exactly so dry-run previews
+			// only what apply will stamp: it Lstat-skips symlinks, whereas
+			// ReadInstrumentalProvenance follows them.
+			fi, lerr := os.Lstat(p)
+			if lerr != nil {
+				if errors.Is(lerr, os.ErrNotExist) {
+					// Marker absent -- nothing to backfill at this path.
+					skipped++
+					continue
+				}
+				slog.Warn("reconcile-marker-provenance: lstat failed", "path", p, "error", lerr)
+				errored++
+				continue
+			}
+			if fi.Mode()&os.ModeSymlink != 0 {
+				// WriteMarkerProvenance is a no-op on symlinks; skip to keep dry-run honest.
+				skipped++
+				continue
+			}
 			prov, isMarker, rerr := lyrics.ReadInstrumentalProvenance(p)
 			if rerr != nil {
-				// Marker absent or unreadable -- nothing to backfill at this path.
+				if errors.Is(rerr, os.ErrNotExist) {
+					// Vanished between the Lstat and the read (e.g. a concurrent
+					// prune) -- same benign "absent" case as the Lstat branch.
+					skipped++
+					continue
+				}
+				slog.Warn("reconcile-marker-provenance: read failed", "path", p, "error", rerr)
+				errored++
 				continue
 			}
 			if !isMarker || prov.Source != "" {
 				// Not a bare marker (already headed, or not a marker) -- skip.
+				skipped++
 				continue
 			}
 			_, _ = fmt.Fprintf(out, "  %s -> [source:%s]%s\n", p, lyrics.SourceDetector, dvNote(r.DetectorVersion))
@@ -93,21 +121,12 @@ func runReconcileMarkerProvenance(ctx context.Context, out io.Writer, args ScanR
 				stamped++
 				continue
 			}
-			changed, werr := lyrics.WriteMarkerProvenance(p, lyrics.InstrumentalProvenance{
-				Source:          lyrics.SourceDetector,
-				DetectorVersion: r.DetectorVersion,
-			})
-			if werr != nil {
-				slog.Warn("reconcile-marker-provenance: stamp failed", "path", p, "error", werr)
-				errored++
-				continue
-			}
-			if !changed {
-				skipped++
-				continue
-			}
-			stamped++
-			// Backup is an audit log, not a recovery necessity: WriteMarkerProvenance is purely additive and trivially reversible (strip the [by:]/[source:]/[dv:] header lines), so it is written after the stamp rather than before.
+			// Write-ahead: secure the backup record before mutating the marker, so a
+			// stamped file is never left unrecorded (a rerun idempotently skips it and
+			// could not recreate the record). The JSONL is therefore a superset of the
+			// files actually mutated: a record whose stamp then no-ops or errors is
+			// harmless, since restore just strips the additive header (a no-op on an
+			// unstamped file) and a rerun re-stamps and re-records.
 			if backupFile == nil {
 				f, ferr := os.OpenFile(backupPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // G304: backupPath is operator-supplied or derived from the configured db dir
 				if ferr != nil {
@@ -124,6 +143,20 @@ func runReconcileMarkerProvenance(ctx context.Context, out io.Writer, args ScanR
 				slog.Error("reconcile-marker-provenance: write backup failed", "error", berr)
 				return 1
 			}
+			changed, werr := lyrics.WriteMarkerProvenance(p, lyrics.InstrumentalProvenance{
+				Source:          lyrics.SourceDetector,
+				DetectorVersion: r.DetectorVersion,
+			})
+			if werr != nil {
+				slog.Warn("reconcile-marker-provenance: stamp failed", "path", p, "error", werr)
+				errored++
+				continue
+			}
+			if !changed {
+				skipped++
+				continue
+			}
+			stamped++
 		}
 	}
 
@@ -135,6 +168,9 @@ func runReconcileMarkerProvenance(ctx context.Context, out io.Writer, args ScanR
 		len(rows), env.libLabel, verb, stamped, skipped, errored, suffixDryRun(args.Yes))
 	if backupFile != nil {
 		_, _ = fmt.Fprintf(out, "backup written to %s\n", backupPath)
+	}
+	if errored > 0 {
+		return 1
 	}
 	return 0
 }
