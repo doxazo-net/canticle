@@ -53,7 +53,7 @@ func (l *Lane) FindLyrics(ctx context.Context, track models.Track, sourcePath st
 	}
 
 	if l.breaker.RecordSuccess() {
-		slog.Info("lane circuit closed; provider recovered", "provider", l.Name())
+		slog.Info("lane circuit closed; recovered", "lane", l.Name())
 	}
 	l.notifySuccess()
 	return song, nil

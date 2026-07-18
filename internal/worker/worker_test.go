@@ -1505,7 +1505,7 @@ func TestCircuitHalfOpenThenRecovers(t *testing.T) {
 	if !hasLog(*recs, slog.LevelDebug, "half-open") {
 		t.Fatalf("logs = %+v; want a Debug 'half-open' on the probe", *recs)
 	}
-	if !hasLog(*recs, slog.LevelInfo, "circuit closed; provider recovered") {
+	if !hasLog(*recs, slog.LevelInfo, "circuit closed; recovered") {
 		t.Fatalf("logs = %+v; want Info recovery after a successful probe round-trip", *recs)
 	}
 	if got := w.circuit.Allow(); got != circuit.StateClosed {
