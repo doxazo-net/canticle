@@ -114,6 +114,7 @@ type fakeQueue struct {
 	releaseErr         error
 	retireErr          error
 	setProviderLaneErr error
+	instrumentalStamps []instrumentalStamp
 }
 
 func (q *fakeQueue) Dequeue(_ context.Context) (queue.WorkItem, error) {
@@ -174,7 +175,17 @@ func (q *fakeQueue) RetireMiss(_ context.Context, id int64) (queue.WorkItem, err
 	return queue.WorkItem{ID: id, Status: queue.StatusDone}, nil
 }
 
-func (q *fakeQueue) SetInstrumentalResult(_ context.Context, _ int64, _ int, _ queue.InstrumentalTelemetry) error {
+// instrumentalStamp captures one SetInstrumentalResult call so tests can
+// assert both the result flag and the telemetry that round-tripped through
+// the stamp path.
+type instrumentalStamp struct {
+	ID     int64
+	Result int
+	Tel    queue.InstrumentalTelemetry
+}
+
+func (q *fakeQueue) SetInstrumentalResult(_ context.Context, id int64, result int, tel queue.InstrumentalTelemetry) error {
+	q.instrumentalStamps = append(q.instrumentalStamps, instrumentalStamp{ID: id, Result: result, Tel: tel})
 	return nil
 }
 
@@ -1821,12 +1832,20 @@ type fakeDetector struct {
 	version      string
 	err          error
 	calls        []string
+	// result, when its Version is non-empty, overrides the instrumental/version
+	// fields above and is returned verbatim - lets tests set the full telemetry
+	// (Confidence/VocalConfidence/SpeechConfidence/WinningVocalClass) without
+	// breaking existing tests that only set instrumental/version.
+	result detector.Result
 }
 
 func (d *fakeDetector) Detect(_ context.Context, audioPath string) (detector.Result, error) {
 	d.calls = append(d.calls, audioPath)
 	if d.err != nil {
 		return detector.Result{}, d.err
+	}
+	if d.result.Version != "" {
+		return d.result, nil
 	}
 	return detector.Result{Instrumental: d.instrumental, Version: d.version}, nil
 }
