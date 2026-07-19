@@ -5,7 +5,7 @@ This page documents every subcommand and flag. For operational guidance (running
 ## Usage
 
 ```text
-Usage: canticle [fetch|serve|scan|library|keys|secrets|config|queue|provenance|completion]
+Usage: canticle [fetch|serve|scan|library|keys|admin|secrets|config|queue|provenance|realign|completion]
 
 Commands:
   fetch       fetch lyrics once without HTTP server or DB queue
@@ -13,10 +13,12 @@ Commands:
   scan        scan configured libraries and enqueue missing lyrics
   library     manage library roots
   keys        manage API keys
+  admin       manage the web-UI admin account
   secrets     manage encrypted-at-rest secrets
   config      inspect or update configuration
   queue       inspect or maintain the durable work queue
   provenance  embed or inspect provenance tags in .lrc files
+  realign     re-attach orphaned .lrc/.txt sidecars to renamed audio files
   completion  output a shell completion script (bash, zsh, or fish)
 
 Global flags:
@@ -96,6 +98,21 @@ canticle keys revoke <raw-api-key>
 ```
 
 `keys` has three subcommands: `create` (`--name`, repeatable `--scope` of `webhook` or `admin`; prints the raw key once), `list` (tab-separated public ID, name, scopes, revoked-at), and `revoke <raw-api-key>`. All accept `--config`. See [Webhook API keys](USER_GUIDE.md#webhook-api-keys) for the full workflow and the web UI equivalent.
+
+## Web UI admin password
+
+```sh
+canticle admin set-password --user admin < newpass.txt
+docker exec -i canticle canticle admin set-password --user admin < newpass.txt
+```
+
+`admin set-password` changes an existing web-UI admin's password. It is the only supported way to do so: there is no password-change screen in the web UI yet (#545), and editing `MXLRC_WEBAUTH_ADMIN_PASSWORD` does nothing once an admin exists, because the environment bootstrap never overwrites an existing account.
+
+The password is read from **standard input, never a flag**, so it stays out of the host process list where any other user could read it. Read it from a file or a secret manager; never embed it in the command itself, including inside a `docker exec ... sh -c '...'` wrapper, since anything on the command line is visible in `ps` and recorded in shell history. This matches `canticle secrets set`, which rejects a value passed on the command line for the same reason. One trailing newline is stripped; leading and trailing spaces are preserved.
+
+The update and the revocation of that user's existing sessions happen in a single transaction, so a rotation cannot half-apply. Everyone signed in with the old password is signed out immediately, including you. No restart is required. Accepts `--config`.
+
+This also works when you are locked out, since it acts on the database rather than requiring a login. See [Changing or resetting the admin password](USER_GUIDE.md#changing-or-resetting-the-admin-password).
 
 ## Secrets
 
