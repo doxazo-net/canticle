@@ -44,6 +44,13 @@ func (l *Lane) Local() bool { return l.local }
 // Breaker exposes the lane's breaker (construction + tests asserting ramp state).
 func (l *Lane) Breaker() *circuit.Breaker { return l.breaker }
 
+// Pacer exposes the lane's optional adaptive pacer (nil when the lane has
+// none), so a caller building a second lane can share the SAME pacer instance
+// -- e.g. wiring the primary provider lane's pacer into a local lane
+// (NewDetectorLane) so that lane's settles can credit ratchet-down decay
+// without themselves spending the provider-request pacing budget (#550).
+func (l *Lane) Pacer() providers.AdaptivePacer { return l.pacer }
+
 // FindLyrics drives the lane's breaker around a resolve call. An open breaker
 // returns ErrLaneUnavailable without calling resolve. Errors run through the
 // lane's injected classifier; success records recovery and pacer stabilization.

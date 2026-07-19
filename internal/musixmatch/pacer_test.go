@@ -335,6 +335,50 @@ func TestPacerConcurrentSlotAllocation(t *testing.T) {
 	}
 }
 
+func TestMinIntervalConcurrentSetAndPaceRaceFree(t *testing.T) {
+	// #494: minInterval used to be read in pace() BEFORE acquiring c.mu, racing
+	// against any concurrent WithMinInterval write. Run under -race: this test's
+	// purpose is to be caught by the race detector against the pre-fix code, not
+	// to assert a particular observed interval (there is no ordering guarantee
+	// between the setter and any given pace() call, only race-freedom).
+	base := time.Unix(4000, 0)
+	var mu sync.Mutex
+	fakeNow := base
+	nowFn := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return fakeNow
+	}
+	sleepFn := func(ctx context.Context, d time.Duration) bool {
+		mu.Lock()
+		fakeNow = fakeNow.Add(d)
+		mu.Unlock()
+		return true
+	}
+	c := newPacerTestClient(time.Millisecond, nowFn, sleepFn)
+
+	var wg sync.WaitGroup
+	for i := range 10 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			c.WithMinInterval(time.Duration(i+1) * time.Millisecond)
+		}(i)
+	}
+	for range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = c.pace(context.Background())
+		}()
+	}
+	wg.Wait()
+
+	if got := c.MinInterval(); got <= 0 {
+		t.Fatalf("MinInterval = %v after concurrent sets; want a positive value set by one of the goroutines", got)
+	}
+}
+
 func TestWithMinIntervalReturnsClient(t *testing.T) {
 	c := NewClient("token")
 	got := c.WithMinInterval(5 * time.Second)

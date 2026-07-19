@@ -256,6 +256,25 @@ func (p *adaptiveStubProvider) OnThrottle() {
 }
 func (p *adaptiveStubProvider) OnSuccess() { p.successes++ }
 
+// TestLanePacerExposesWiredPacer covers Lane.Pacer(), added for #550 so a
+// second lane (e.g. NewDetectorLane) can share the primary lane's pacer
+// instance. A provider lane that does not implement providers.AdaptivePacer
+// must expose a nil pacer; one that does must expose that exact instance.
+func TestLanePacerExposesWiredPacer(t *testing.T) {
+	plain := &stubProvider{name: "plain"}
+	plainLane, _ := newTestLane(plain)
+	if got := plainLane.Pacer(); got != nil {
+		t.Fatalf("Pacer() = %v; want nil for a non-adaptive provider", got)
+	}
+
+	adaptive := &adaptiveStubProvider{name: "adaptive"}
+	cb := circuit.New(60*time.Second, 30*time.Minute)
+	adaptiveLane := NewProviderLane(adaptive, cb)
+	if got := adaptiveLane.Pacer(); got != adaptive {
+		t.Fatalf("Pacer() = %v; want the exact adaptiveStubProvider instance %v", got, adaptive)
+	}
+}
+
 func TestLaneCallsOnThrottleOnTripAfterSuccess(t *testing.T) {
 	// A 401 AFTER the token has succeeded this session is an egress-IP throttle:
 	// the pacer must ratchet.

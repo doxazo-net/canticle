@@ -33,7 +33,7 @@ func TestDetectorLane_GatePositiveIsSuitableWithTelemetry(t *testing.T) {
 		Instrumental: true, Confidence: 0.9, VocalConfidence: 0.01,
 		SpeechConfidence: 0.02, WinningVocalClass: "Singing", Version: "1.5.0",
 	}}
-	lane := NewDetectorLane(d, circuit.New(time.Minute, time.Hour))
+	lane := NewDetectorLane(d, circuit.New(time.Minute, time.Hour), nil)
 	song, err := lane.FindLyrics(context.Background(), models.Track{TrackName: "x"}, "/music/x.flac")
 	if err != nil {
 		t.Fatalf("err = %v", err)
@@ -55,7 +55,7 @@ func TestDetectorLane_GatePositiveIsSuitableWithTelemetry(t *testing.T) {
 
 func TestDetectorLane_GateNegativeIsBenignMiss(t *testing.T) {
 	d := &stubDetector{res: detector.Result{Instrumental: false, Version: "1.5.0"}}
-	lane := NewDetectorLane(d, circuit.New(time.Minute, time.Hour))
+	lane := NewDetectorLane(d, circuit.New(time.Minute, time.Hour), nil)
 	_, err := lane.FindLyrics(context.Background(), models.Track{}, "/music/x.flac")
 	if ClassifyOutcome(err) != OutcomeBenignMiss {
 		t.Fatalf("gate-negative outcome = %v, want OutcomeBenignMiss", ClassifyOutcome(err))
@@ -64,7 +64,7 @@ func TestDetectorLane_GateNegativeIsBenignMiss(t *testing.T) {
 
 func TestDetectorLane_EmptyPathIsBenignMiss(t *testing.T) {
 	d := &stubDetector{res: detector.Result{Instrumental: true, Version: "1.5.0"}}
-	lane := NewDetectorLane(d, circuit.New(time.Minute, time.Hour))
+	lane := NewDetectorLane(d, circuit.New(time.Minute, time.Hour), nil)
 	_, err := lane.FindLyrics(context.Background(), models.Track{}, "")
 	if ClassifyOutcome(err) != OutcomeBenignMiss {
 		t.Fatalf("empty-path outcome = %v, want OutcomeBenignMiss", ClassifyOutcome(err))
@@ -76,7 +76,7 @@ func TestDetectorLane_EmptyPathIsBenignMiss(t *testing.T) {
 
 func TestDetectorClassifier_OtherErrorWrapsAndLeavesBreakerUntouched(t *testing.T) {
 	br := circuit.New(time.Minute, time.Hour)
-	lane := NewDetectorLane(&stubDetector{}, br)
+	lane := NewDetectorLane(&stubDetector{}, br, nil)
 	cause := errors.New("unexpected decode failure")
 
 	wrapped := detectorClassifier(lane, cause)
@@ -95,10 +95,73 @@ func TestDetectorClassifier_OtherErrorWrapsAndLeavesBreakerUntouched(t *testing.
 	}
 }
 
+// stubPacer is a minimal providers.AdaptivePacer recording notification
+// counts, used to prove which lane notifications actually reach a shared
+// pacer instance (as opposed to a lane's own mock ratchet).
+type stubPacer struct {
+	throttles int
+	successes int
+}
+
+func (p *stubPacer) OnThrottle() { p.throttles++ }
+func (p *stubPacer) OnSuccess()  { p.successes++ }
+
+// TestDetectorLane_GatePositiveCreditsSharedPacer is the #550 discriminator: a
+// detector settle must credit the SAME pacer instance the primary provider
+// lane uses, so the measured production gap (8 of 52 settles were detector
+// instrumentals crediting nothing) is closed. Against the pre-#550
+// constructor (no pacer parameter, Lane.pacer always nil for a detector lane)
+// this fails because OnSuccess is never reachable -- there was no pacer to
+// call it on.
+func TestDetectorLane_GatePositiveCreditsSharedPacer(t *testing.T) {
+	d := &stubDetector{res: detector.Result{Instrumental: true, Version: "1.5.0"}}
+	pacer := &stubPacer{}
+	lane := NewDetectorLane(d, circuit.New(time.Minute, time.Hour), pacer)
+
+	_, err := lane.FindLyrics(context.Background(), models.Track{TrackName: "x"}, "/music/x.flac")
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if pacer.successes != 1 {
+		t.Fatalf("pacer.successes = %d; want 1 (a gate-positive detector settle must credit decay)", pacer.successes)
+	}
+	if pacer.throttles != 0 {
+		t.Fatalf("pacer.throttles = %d; want 0 (a detector settle is never a throttle signal)", pacer.throttles)
+	}
+}
+
+// TestDetectorLane_GateNegativeDoesNotCreditPacer asserts the credit is scoped
+// to a genuine gate-positive settle: a benign miss must not fake a success
+// signal into the shared pacer, mirroring the provider lane's existing
+// "no OnSuccess on a benign miss" rule (lane.go's notifySuccess is reached
+// only on the FindLyrics success path).
+func TestDetectorLane_GateNegativeDoesNotCreditPacer(t *testing.T) {
+	d := &stubDetector{res: detector.Result{Instrumental: false, Version: "1.5.0"}}
+	pacer := &stubPacer{}
+	lane := NewDetectorLane(d, circuit.New(time.Minute, time.Hour), pacer)
+
+	_, _ = lane.FindLyrics(context.Background(), models.Track{}, "/music/x.flac")
+	if pacer.successes != 0 {
+		t.Fatalf("pacer.successes = %d; want 0 (a benign miss must not credit decay)", pacer.successes)
+	}
+}
+
+// TestDetectorLane_NilPacerIsSafe covers every pre-#550 call site (nil pacer):
+// a detector settle must not panic or otherwise misbehave when no pacer is
+// wired in.
+func TestDetectorLane_NilPacerIsSafe(t *testing.T) {
+	d := &stubDetector{res: detector.Result{Instrumental: true, Version: "1.5.0"}}
+	lane := NewDetectorLane(d, circuit.New(time.Minute, time.Hour), nil)
+
+	if _, err := lane.FindLyrics(context.Background(), models.Track{TrackName: "x"}, "/music/x.flac"); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestDetectorLane_OutageTripsBreaker(t *testing.T) {
 	d := &stubDetector{err: errors.New("connection refused")}
 	br := circuit.New(time.Minute, time.Hour)
-	lane := NewDetectorLane(d, br)
+	lane := NewDetectorLane(d, br, nil)
 	_, err := lane.FindLyrics(context.Background(), models.Track{}, "/music/x.flac")
 	if ClassifyOutcome(err) != OutcomeLaneOutage {
 		t.Fatalf("outage outcome = %v, want OutcomeLaneOutage", ClassifyOutcome(err))

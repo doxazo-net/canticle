@@ -325,7 +325,11 @@ func (w *Worker) rebuildOrchestrator() error {
 		} else {
 			cb := circuit.New(w.circuitBackoffBase, w.circuitOpenDuration)
 			cb.SetClock(w.now)
-			detLane := orchestrator.NewDetectorLane(w.audioDetector, cb)
+			// Share the primary provider lane's pacer so a detector settle credits
+			// the same ratchet-down counter the musixmatch client's OnThrottle
+			// ratchets up (#550) -- this is a decay CREDIT only; the detector lane
+			// stays local:true and never pays the provider-request pacing pause.
+			detLane := orchestrator.NewDetectorLane(w.audioDetector, cb, w.lane.Pacer())
 			if w.detectorOrdering == "front" {
 				lanes = append([]*orchestrator.Lane{detLane}, lanes...)
 			} else {
