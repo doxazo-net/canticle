@@ -40,7 +40,7 @@ func vocalTrackDetector() *stubDetector {
 // detectorLaneFront builds the lane order a high-lyric-coverage library runs:
 // the detector first, the provider behind it.
 func detectorLaneFront(d detector.Detector, provider *Lane) []*Lane {
-	lane := NewDetectorLane(d, circuit.New(time.Minute, time.Hour))
+	lane := NewDetectorLane(d, circuit.New(time.Minute, time.Hour), nil)
 	return []*Lane{lane, provider}
 }
 

@@ -29,6 +29,20 @@ const (
 	// required before the adaptive level steps down by one. Requiring a sustained
 	// clean streak prevents premature recovery that would restart the sawtooth.
 	adaptiveSuccessThreshold = 5
+	// adaptiveDecayInterval is how long the pacer must go without a fresh
+	// OnThrottle before it eases the adaptive level down by one step, evaluated
+	// lazily on each pace() call (see decayLocked) rather than by a background
+	// goroutine/ticker. It exists because adaptiveSuccessThreshold alone can
+	// starve: measured production traffic settled 52 items in the window after
+	// the last ratchet with only 2 reaching OnSuccess (most were benign misses,
+	// which never reach the pacer), so the consecutive-streak path is
+	// effectively unreachable and the level would otherwise be permanent until
+	// restart (#492). 20 minutes is a deliberate middle ground: a full unwind
+	// from adaptiveMaxLevel takes 3 * this (60 minutes), which is long enough
+	// that a short lull between genuine 401s does not immediately erase the
+	// ratchet and re-provoke the provider, but short enough to recover within a
+	// single day of serve-mode operation even when catalog-hit luck is poor.
+	adaptiveDecayInterval = 20 * time.Minute
 )
 
 // Sentinel errors returned by the Musixmatch client. Callers should use
@@ -139,6 +153,12 @@ type Client struct {
 	// recovery cycles (the breaker's trip count is deliberately NOT used).
 	adaptiveLevel        int
 	consecutiveSuccesses int
+	// lastLevelChange is the time adaptiveLevel last changed (up via OnThrottle,
+	// or down via either the success streak or time decay). The zero value means
+	// "never changed" -- decayLocked will not fire until a throttle has actually
+	// occurred, since there is nothing to decay from and no meaningful elapsed
+	// window to measure.
+	lastLevelChange time.Time
 }
 
 // NewClient creates a new Musixmatch API client.
@@ -169,16 +189,26 @@ func ctxSleep(ctx context.Context, d time.Duration) bool {
 //
 //	client := musixmatch.NewClient(token).WithMinInterval(15 * time.Second)
 //
-// A zero or negative value disables pacing (the default). This method is not
-// goroutine-safe; call it before sharing the client across goroutines.
+// A zero or negative value disables pacing (the default). The write is
+// guarded by the same mutex pace() reads minInterval under (#494), so calling
+// this concurrently with in-flight FindLyrics calls is race-free -- but it is
+// still not a supported runtime reconfiguration knob: a concurrent caller may
+// observe either the old or the new interval for any given pace() call, with
+// no ordering guarantee beyond "no data race." Prefer setting it once before
+// sharing the client across goroutines.
 func (c *Client) WithMinInterval(d time.Duration) *Client {
+	c.mu.Lock()
 	c.minInterval = d
+	c.mu.Unlock()
 	return c
 }
 
 // MinInterval returns the configured minimum request interval. A zero value
-// means pacing is disabled.
+// means pacing is disabled. Guarded by the same mutex WithMinInterval writes
+// under (#494).
 func (c *Client) MinInterval() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.minInterval
 }
 
@@ -197,12 +227,20 @@ func (c *Client) MinInterval() time.Duration {
 // reserved slot best-effort (see the rollback below) so it does not push every
 // later caller back one interval.
 func (c *Client) pace(ctx context.Context) error {
+	c.mu.Lock()
+	// minInterval is read under the lock (#494): it is written by
+	// WithMinInterval, which also takes c.mu, so reading it before Lock (as this
+	// used to) was a bare data race against any concurrent setter, independent
+	// of the adaptive-state fields below.
 	if c.minInterval <= 0 {
+		c.mu.Unlock()
 		return nil
 	}
-
-	c.mu.Lock()
 	now := c.now()
+	// Lazily evaluate time-based ratchet-down before reading the level: this is
+	// the sole checkpoint (no goroutine/ticker), so it must run on every pace()
+	// call, under the same lock that guards adaptiveLevel.
+	c.decayLocked(now)
 	// Adaptive interval: minInterval scaled by the current ratcheting level.
 	// minInterval is the floor (level 0 == 1x), keeping api.cooldown as the
 	// explicit override the operator configured.
@@ -256,7 +294,11 @@ func (c *Client) pace(ctx context.Context) error {
 // takes no parameter: the level is maintained independently of the circuit
 // breaker's trip count so it persists across circuit recovery cycles (using the
 // breaker's trips would snap the multiplier back to 1x on every recovery, the
-// exact sawtooth this fixes).
+// exact sawtooth this fixes). It always resets the decay clock to now, so a
+// fresh throttle re-ratchets immediately and time decay cannot fire again until
+// a full adaptiveDecayInterval of throttle-free time has passed since THIS
+// event -- the provider gets the full benefit of the doubt period after every
+// genuine throttle signal.
 func (c *Client) OnThrottle() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -264,12 +306,16 @@ func (c *Client) OnThrottle() {
 		c.adaptiveLevel++
 	}
 	c.consecutiveSuccesses = 0
+	c.lastLevelChange = c.now()
 }
 
 // OnSuccess implements the providers.AdaptivePacer interface. It records a
 // successful fetch; once consecutiveSuccesses reaches adaptiveSuccessThreshold
 // it steps the adaptive level down by one (floored at 0) and resets the
-// counter, gradually easing the effective interval back toward the floor.
+// counter, gradually easing the effective interval back toward the floor. This
+// streak-based path and decayLocked's time-based path are independent triggers
+// for the same step-down action; either one firing resets the decay clock so
+// the two do not double-count the same window.
 func (c *Client) OnSuccess() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -277,8 +323,32 @@ func (c *Client) OnSuccess() {
 	if c.consecutiveSuccesses >= adaptiveSuccessThreshold {
 		if c.adaptiveLevel > 0 {
 			c.adaptiveLevel--
+			c.lastLevelChange = c.now()
 		}
 		c.consecutiveSuccesses = 0
+	}
+}
+
+// decayLocked steps the adaptive level down by one for each full
+// adaptiveDecayInterval that has elapsed, throttle-free, since lastLevelChange.
+// Called under c.mu from pace() -- the natural per-request checkpoint -- so no
+// goroutine or lifecycle is needed to drive it. Looping (rather than a single
+// step) bounds the catch-up to however much wall-clock time has genuinely
+// elapsed, e.g. after an idle period with no requests at all, while never
+// stepping down faster than one level per adaptiveDecayInterval. It does not
+// consult minInterval: the floor guarantee comes from level 0 already being the
+// operator's configured minInterval (1x multiplier) -- adaptiveLevel cannot go
+// negative, so decay can never make the effective interval faster than that
+// floor. OnThrottle must still win a race with decay: it is the only path that
+// raises the level, and it always runs to completion under the same lock decay
+// runs under, so worst case is one extra request slips through at the eased
+// interval before the next throttle re-ratchets (an intentional, bounded cost
+// per the design constraints, not a bug).
+func (c *Client) decayLocked(now time.Time) {
+	for c.adaptiveLevel > 0 && !c.lastLevelChange.IsZero() && now.Sub(c.lastLevelChange) >= adaptiveDecayInterval {
+		c.adaptiveLevel--
+		c.consecutiveSuccesses = 0
+		c.lastLevelChange = c.lastLevelChange.Add(adaptiveDecayInterval)
 	}
 }
 
