@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -169,6 +170,33 @@ func TestHandleDashboard_UpNextPanel(t *testing.T) {
 	// The miss-tier badge renders for the deferred benign-miss row.
 	if !strings.Contains(body, "mx-upnext-tier-miss") {
 		t.Error("dashboard missing miss-tier badge class")
+	}
+}
+
+// TestHandleDashboard_UpNextCappedCount verifies the header reports the TRUE
+// buffered count even when the buffer exceeds the display cap
+// (dashboardUpNextLimit): the count comes from the DB, not the capped row slice
+// (#572 CR). Discriminates: a len(rows)-based header would read "50 buffered".
+func TestHandleDashboard_UpNextCappedCount(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	total := dashboardUpNextLimit + 1 // one past the display cap
+	for i := 1; i <= total; i++ {
+		insertBuffered(t, sqlDB, "Test Artist", "Track "+strconv.Itoa(i), "Album", "pending", 0, i)
+	}
+
+	mux := newReportsUIServer(t, sqlDB)
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	want := strconv.Itoa(total) + " buffered of " + strconv.Itoa(total) + " eligible"
+	if !strings.Contains(body, want) {
+		t.Errorf("header must report true buffered count %q; got: %s", want, excerptAround(body, "buffered of"))
+	}
+	// The displayed table is still capped at the display limit.
+	if n := strings.Count(body, `class="mx-cell-mono mx-upnext-pos"`); n != dashboardUpNextLimit {
+		t.Errorf("displayed rows = %d, want %d (display cap)", n, dashboardUpNextLimit)
 	}
 }
 

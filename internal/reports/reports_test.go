@@ -668,11 +668,13 @@ func TestQueueEligibility(t *testing.T) {
 	repo := reports.New(sqlDB)
 
 	// Eligible: pending, failed, deferred with a past (default) next_attempt_at.
-	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "elig-pending", status: "pending"})
-	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "elig-failed", status: "failed"})
+	// Two of them are buffered (batch_seq set) -> Buffered counts exactly those.
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "elig-pending", status: "pending", batchSeq: 1})
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "elig-failed", status: "failed", batchSeq: 2})
 	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "elig-deferred", status: "deferred"})
-	// Cooldown: same statuses but next_attempt_at in the future.
-	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "cool-deferred", status: "deferred", nextAttemptAt: "3000-01-01T00:00:00Z"})
+	// Cooldown: same statuses but next_attempt_at in the future. One carries a
+	// batch_seq, which must NOT count as Buffered (it is not eligible now).
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "cool-deferred", status: "deferred", nextAttemptAt: "3000-01-01T00:00:00Z", batchSeq: 3})
 	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "cool-failed", status: "failed", nextAttemptAt: "3000-01-01T00:00:00Z"})
 	// Excluded from both: done and processing are not part of the backlog.
 	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "done", status: "done"})
@@ -687,6 +689,11 @@ func TestQueueEligibility(t *testing.T) {
 	}
 	if got.Cooldown != 2 {
 		t.Errorf("Cooldown = %d, want 2", got.Cooldown)
+	}
+	// Buffered = the two eligible rows with a batch_seq; the buffered cooldown
+	// row is excluded because it is not eligible now.
+	if got.Buffered != 2 {
+		t.Errorf("Buffered = %d, want 2 (buffered cooldown row must not count)", got.Buffered)
 	}
 }
 

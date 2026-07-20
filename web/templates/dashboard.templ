@@ -240,7 +240,7 @@ templ dashUpNext(rows []UpNextRow, header, empty string) {
 	<section
 		class="mx-dash-section"
 		aria-labelledby="mx-dash-upnext-heading"
-		title="Buffered upcoming work in the order the background worker will claim it. Composed once per batch; refresh to update."
+		title={ dashUpNextTitle(len(rows) == 0) }
 	>
 		<h2 class="mx-dash-section-title" id="mx-dash-upnext-heading">Up Next</h2>
 		if len(rows) == 0 {
@@ -275,6 +275,16 @@ templ dashUpNext(rows []UpNextRow, header, empty string) {
 			</div>
 		}
 	</section>
+}
+
+// dashUpNextTitle returns the section tooltip. Only the populated panel asserts
+// claim ORDER; the empty state has no ordered list, so it must not imply one
+// (#572 CR).
+func dashUpNextTitle(empty bool) string {
+	if empty {
+		return "Buffered upcoming work. Nothing is buffered right now; showing the eligible and cooldown counts. Refresh to update."
+	}
+	return "Buffered upcoming work in the order the background worker will claim it. Composed once per batch; refresh to update."
 }
 
 // dashUpNextTierClass returns the badge classes for an Up-next tier label. The
