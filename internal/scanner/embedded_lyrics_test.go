@@ -74,6 +74,37 @@ func TestScanLibrary_EmbeddedLyricsExtractDoesNotBlockUpgrade(t *testing.T) {
 	}
 }
 
+// A failed sidecar write must not drop the track. The extract path promises the
+// track is still enqueued so an ordinary fetch is attempted -- silently skipping
+// it would lose the work with only a warning to show for it.
+func TestScanLibrary_EmbeddedLyricsExtractWriteFailureStillEnqueues(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a read-only directory does not block writes, so the failure cannot be injected")
+	}
+	dir := t.TempDir()
+	if err := testutil.WriteAudioFile(dir, "song.mp3", "Artist", "Title", "Album", "placeholder lyric text"); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	// Read-only directory: the sidecar's temp file cannot be created, so
+	// extraction fails. t.TempDir()'s cleanup needs the bit back.
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatalf("chmod dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	sc := NewScanner()
+	res, err := sc.ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 100, EmbeddedLyrics: "extract"})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("got %d results; want 1 -- a failed sidecar write must fall through to enqueue, not silently skip the track", len(res))
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "song.txt")); statErr == nil {
+		t.Error("song.txt exists; the write was supposed to fail, so this test is not exercising the failure path")
+	}
+}
+
 func TestScanLibrary_EmbeddedLyricsExtract(t *testing.T) {
 	dir := t.TempDir()
 	if err := testutil.WriteAudioFile(dir, "song.mp3", "Artist", "Title", "Album", "la la la"); err != nil {
