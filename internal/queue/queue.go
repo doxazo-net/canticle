@@ -125,6 +125,11 @@ type DBQueue struct {
 	// (via SetRandomized) to restore deterministic created_at/id ordering. Also
 	// doubles as the test seam for deterministic ordering assertions.
 	randomized bool
+	// batchSize is the shuffled lookahead buffer size (#571). When randomized and
+	// > 0, Dequeue draws this many eligible rows at random once per batch and
+	// serves them in a stamped order; <= 0 restores the per-item random path. Set
+	// via SetBatchSize from the commands layer after config is loaded.
+	batchSize int
 	// providersVersion is the current providers generation stamped onto new
 	// work_queue rows by Enqueue. 0 means "not configured" and preserves
 	// backward compatibility with call sites that do not supply a generation.
@@ -140,7 +145,21 @@ func NewDBQueue(db *sql.DB) *DBQueue {
 		maxBackoff:  backoff.DefaultMax,
 		now:         time.Now,
 		randomized:  true,
+		batchSize:   defaultBatchSize,
 	}
+}
+
+// defaultBatchSize keeps NewDBQueue self-consistent when a caller never calls
+// SetBatchSize. It mirrors config.queueBatchSizeDefault; the commands layer
+// wires the configured value over it at startup.
+const defaultBatchSize = 10
+
+// SetBatchSize sets the shuffled lookahead buffer size (#571). It lets callers
+// apply the configured queue.batch_size / MXLRC_QUEUE_BATCH_SIZE setting without
+// changing the NewDBQueue call sites. A value <= 0 disables batching and
+// restores the per-item random path.
+func (q *DBQueue) SetBatchSize(n int) {
+	q.batchSize = n
 }
 
 // SetRandomized toggles whether Dequeue shuffles within a priority tier. It lets
@@ -290,6 +309,19 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 			return WorkItem{}, fmt.Errorf("queue: link scan_result %d: %w", inputs.ScanResultID, err)
 		}
 	}
+	// Webhook-priority work preempts the shuffled lookahead buffer (#571): clear
+	// batch_seq on every buffered row so the next Dequeue redraws a batch that
+	// includes this just-enqueued row, which then wins on priority DESC. Reuses
+	// the same priority >= PriorityWebhook branch that refreshes failed backoff.
+	// Harmless when batching is off (no rows carry batch_seq) and a no-op when the
+	// buffer is already empty. Worst-case added latency is a single dequeue.
+	if priority >= PriorityWebhook {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE work_queue SET batch_seq = NULL WHERE batch_seq IS NOT NULL`,
+		); err != nil {
+			return WorkItem{}, fmt.Errorf("queue: clear batch buffer on webhook enqueue: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return WorkItem{}, fmt.Errorf("queue: commit enqueue tx: %w", err)
 	}
@@ -330,20 +362,114 @@ const dequeueDeterministicSQL = `UPDATE work_queue
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
                    miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`
 
-// Dequeue atomically claims the next ready item and marks it processing.
+// dequeueBatchedClaimSQL claims the eligible buffered row with the lowest
+// batch_seq and clears its batch_seq in the same atomic statement, so a claimed
+// row leaves the buffer at claim time. It re-applies the full eligibility
+// predicate, so a buffered row that was since completed, pruned, or re-keyed
+// simply fails to match and is skipped rather than served (batch_seq is
+// advisory). prev_status is stamped exactly as the non-batched claims do,
+// preserving the #569 invariant that claiming and prev_status stamping are
+// atomic. (RETURNING list duplicated across the claim statements as elsewhere in
+// this file; a dedup is a separate refactor.)
+const dequeueBatchedClaimSQL = `UPDATE work_queue
+         SET status = 'processing',
+             prev_status = status,
+             batch_seq = NULL
+         WHERE id = (
+             SELECT id
+             FROM work_queue
+             WHERE status IN ('pending', 'failed', 'deferred')
+               AND next_attempt_at <= ?
+               AND batch_seq IS NOT NULL
+             ORDER BY batch_seq ASC
+             LIMIT 1
+         )
+         RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`
+
+// drawBatchSQL stamps batch_seq = 1..N on the top-N eligible unbuffered rows,
+// randomizing composition and intra-tier order once per batch while preserving
+// priority tiers (webhook rows draw first). The RANDOM() shuffle is the
+// anti-fingerprint mechanism, moved from per-claim to per-batch. ROW_NUMBER()
+// and UPDATE ... FROM are both supported by modernc.org/sqlite (proven in
+// migration 004). batch_seq IS NULL restricts the draw to fresh rows; at draw
+// time every eligible row is unbuffered, since any eligible buffered row would
+// have been claimed before the draw ran.
+//
+// The subquery's `ORDER BY rn` before `LIMIT ?` is load-bearing: the window
+// ORDER BY only assigns rn, and SQLite leaves the final row order undefined
+// without a top-level ORDER BY, so LIMIT could otherwise keep an arbitrary N
+// rows rather than the top-N by priority -- dropping a high-priority (webhook)
+// row from the batch. Ordering by rn guarantees LIMIT takes ranks 1..N.
+const drawBatchSQL = `UPDATE work_queue
+         SET batch_seq = ranked.rn
+         FROM (
+             SELECT id, ROW_NUMBER() OVER (ORDER BY priority DESC, RANDOM()) AS rn
+             FROM work_queue
+             WHERE status IN ('pending', 'failed', 'deferred')
+               AND next_attempt_at <= ?
+               AND batch_seq IS NULL
+             ORDER BY rn
+             LIMIT ?
+         ) AS ranked
+         WHERE work_queue.id = ranked.id`
+
+// Dequeue atomically claims the next ready item and marks it processing. Three
+// paths, by config: deterministic FIFO (randomize=false), per-item random
+// (randomize=true, batch_size<=0), or the shuffled lookahead buffer
+// (randomize=true, batch_size>0, the default). See #571.
 func (q *DBQueue) Dequeue(ctx context.Context) (WorkItem, error) {
 	now := formatTime(q.now())
+	if q.randomized && q.batchSize > 0 {
+		return q.dequeueBatched(ctx, now)
+	}
 	query := dequeueDeterministicSQL
 	if q.randomized {
 		query = dequeueRandomizedSQL
 	}
-	row := q.db.QueryRowContext(ctx, query, now)
-	item, err := scanWorkItem(row)
+	item, err := scanWorkItem(q.db.QueryRowContext(ctx, query, now))
 	if errors.Is(err, sql.ErrNoRows) {
 		return WorkItem{}, sql.ErrNoRows
 	}
 	if err != nil {
 		return WorkItem{}, fmt.Errorf("queue: dequeue: %w", err)
+	}
+	return item, nil
+}
+
+// dequeueBatched serves the shuffled lookahead buffer: claim the lowest-batch_seq
+// eligible buffered row; if none exists, draw a fresh batch and claim again. The
+// draw (stamping batch_seq) and the claim are two statements, so they run in one
+// transaction -- the DB is single-connection, but each bare statement would
+// release it, letting a concurrent webhook Enqueue clear batch_seq between draw
+// and claim. Holding the connection across the brief draw+claim window keeps the
+// operation coherent. The claim itself stays a single atomic UPDATE ... RETURNING.
+func (q *DBQueue) dequeueBatched(ctx context.Context, now string) (WorkItem, error) {
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return WorkItem{}, fmt.Errorf("queue: begin batched dequeue tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Claim the lowest-batch_seq eligible buffered row. If the buffer holds none,
+	// draw a fresh batch and claim again. A single ErrNoRows check then covers
+	// both "nothing buffered yet" (first call) and "pool genuinely empty" (after
+	// the draw found nothing), so there is one claim-error path and one commit.
+	item, err := scanWorkItem(tx.QueryRowContext(ctx, dequeueBatchedClaimSQL, now))
+	if errors.Is(err, sql.ErrNoRows) {
+		if _, derr := tx.ExecContext(ctx, drawBatchSQL, now, q.batchSize); derr != nil {
+			return WorkItem{}, fmt.Errorf("queue: draw batch: %w", derr)
+		}
+		item, err = scanWorkItem(tx.QueryRowContext(ctx, dequeueBatchedClaimSQL, now))
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return WorkItem{}, sql.ErrNoRows // pool empty even after a fresh draw
+	}
+	if err != nil {
+		return WorkItem{}, fmt.Errorf("queue: batched claim: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return WorkItem{}, fmt.Errorf("queue: commit batched dequeue tx: %w", err)
 	}
 	return item, nil
 }
