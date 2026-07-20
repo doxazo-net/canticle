@@ -295,10 +295,33 @@ func TestOpen_WorkQueueBackoffMigration(t *testing.T) {
 	}
 }
 
-// TestMigration011BackfillsKeysAndDownMigrates drives migration 011 directly:
-// it migrates to v10, seeds a pre-011 row with non-ASCII metadata, applies 011,
-// and asserts the artist_key/title_key backfill and index, then down-migrates
-// and asserts the columns are removed.
+// applyOpenPragmas configures a directly-opened test connection with the same
+// pragmas Open applies, so a test that drives goose without going through Open
+// still exercises migrations under the persistence contract they run under in
+// production (WAL, foreign-key enforcement, busy retry). Kept as a helper rather
+// than inline SQL per test so the set cannot drift between call sites.
+func applyOpenPragmas(ctx context.Context, t *testing.T, sqlDB *sql.DB) {
+	t.Helper()
+	// Limit to one connection so per-connection pragmas apply reliably.
+	sqlDB.SetMaxOpenConns(1)
+	var journalMode string
+	if err := sqlDB.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
+		t.Fatalf("set journal_mode=WAL: %v", err)
+	}
+	if journalMode != "wal" {
+		t.Fatalf("journal_mode = %q; want %q", journalMode, "wal")
+	}
+	for _, p := range []string{
+		"PRAGMA foreign_keys=ON",
+		"PRAGMA busy_timeout=5000",
+		"PRAGMA synchronous=NORMAL",
+	} {
+		if _, err := sqlDB.ExecContext(ctx, p); err != nil {
+			t.Fatalf("pragma %q: %v", p, err)
+		}
+	}
+}
+
 // Migration 030 adds prev_status and repairs rows stranded by the pre-#569
 // Release, which forced every throttle-released row to 'pending' regardless of
 // the status it was claimed from. A deferred row released that way kept its
@@ -312,7 +335,7 @@ func TestMigration030AddsPrevStatusAndRepairsStrandedRows(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
-	sqlDB.SetMaxOpenConns(1)
+	applyOpenPragmas(ctx, t, sqlDB)
 
 	migFS, err := fs.Sub(migrations, "migrations")
 	if err != nil {
@@ -378,6 +401,10 @@ func TestMigration030AddsPrevStatusAndRepairsStrandedRows(t *testing.T) {
 	}
 }
 
+// TestMigration011BackfillsKeysAndDownMigrates drives migration 011 directly:
+// it migrates to v10, seeds a pre-011 row with non-ASCII metadata, applies 011,
+// and asserts the artist_key/title_key backfill and index, then down-migrates
+// and asserts the columns are removed.
 func TestMigration011BackfillsKeysAndDownMigrates(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "mig011.db")
