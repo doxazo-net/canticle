@@ -1136,6 +1136,11 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		defer wg.Done()
 		runIdentityBackfill(runCtx, sqlDB)
 	}()
+	// Credit historical detector settles to provider_outcomes (#548). Runs
+	// inline, not in a goroutine: it is one COUNT plus one counter UPDATE in a
+	// single transaction, so it finishes before the listener is up and does not
+	// race the worker's own live counter writes.
+	runProviderOutcomesBackfill(runCtx, sqlDB)
 	// Background session sweeper: periodically delete expired/revoked sessions,
 	// mirroring the worker/scheduler goroutine + context-cancel pattern. Only
 	// runs when the authenticated UI is mounted (there are no sessions otherwise).
