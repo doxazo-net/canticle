@@ -299,6 +299,85 @@ func TestOpen_WorkQueueBackoffMigration(t *testing.T) {
 // it migrates to v10, seeds a pre-011 row with non-ASCII metadata, applies 011,
 // and asserts the artist_key/title_key backfill and index, then down-migrates
 // and asserts the columns are removed.
+// Migration 030 adds prev_status and repairs rows stranded by the pre-#569
+// Release, which forced every throttle-released row to 'pending' regardless of
+// the status it was claimed from. A deferred row released that way kept its
+// PriorityMiss (-100) but sat in 'pending', where RecheckDeferred and
+// `queue deferred` (both scoped WHERE status='deferred') could not reach it.
+func TestMigration030AddsPrevStatusAndRepairsStrandedRows(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "mig030.db")
+	sqlDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	sqlDB.SetMaxOpenConns(1)
+
+	migFS, err := fs.Sub(migrations, "migrations")
+	if err != nil {
+		t.Fatalf("sub migrations fs: %v", err)
+	}
+	provider, err := goose.NewProvider(goose.DialectSQLite3, sqlDB, migFS)
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	if _, err := provider.UpTo(ctx, 29); err != nil {
+		t.Fatalf("UpTo(29): %v", err)
+	}
+
+	// Three rows that must be told apart by the repair:
+	//   stranded  -- ex-deferred, released to pending, still PriorityMiss.
+	//   fresh     -- genuine scan work; must stay pending.
+	//   missfree  -- PriorityMiss but never deferred; must stay pending.
+	seed := func(artist string, priority, missCount int) {
+		t.Helper()
+		if _, err := sqlDB.ExecContext(ctx,
+			`INSERT INTO work_queue (artist, title, artist_key, title_key, status, priority, miss_count, next_attempt_at)
+             VALUES (?, ?, ?, ?, 'pending', ?, ?, '2026-01-01T00:00:00Z')`,
+			artist, "T", artist, "t", priority, missCount,
+		); err != nil {
+			t.Fatalf("seed %s: %v", artist, err)
+		}
+	}
+	seed("stranded", -100, 1)
+	seed("fresh", 0, 0)
+	seed("missfree", -100, 0)
+
+	if _, err := provider.UpTo(ctx, 30); err != nil {
+		t.Fatalf("UpTo(30): %v", err)
+	}
+
+	for _, tc := range []struct {
+		artist string
+		want   string
+	}{
+		{"stranded", "deferred"},
+		{"fresh", "pending"},
+		{"missfree", "pending"},
+	} {
+		var got string
+		if err := sqlDB.QueryRowContext(ctx,
+			`SELECT status FROM work_queue WHERE artist_key = ?`, tc.artist).Scan(&got); err != nil {
+			t.Fatalf("query %s: %v", tc.artist, err)
+		}
+		if got != tc.want {
+			t.Errorf("%s status = %q; want %q", tc.artist, got, tc.want)
+		}
+	}
+
+	// prev_status exists and defaults to the empty sentinel, which Release
+	// treats as 'pending' so pre-migration rows keep the old behavior.
+	var prevStatus string
+	if err := sqlDB.QueryRowContext(ctx,
+		`SELECT prev_status FROM work_queue WHERE artist_key = ?`, "fresh").Scan(&prevStatus); err != nil {
+		t.Fatalf("query prev_status: %v", err)
+	}
+	if prevStatus != "" {
+		t.Errorf("prev_status = %q; want empty sentinel", prevStatus)
+	}
+}
+
 func TestMigration011BackfillsKeysAndDownMigrates(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "mig011.db")
