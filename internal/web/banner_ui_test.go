@@ -9,8 +9,13 @@ import (
 	"github.com/sydlexius/canticle/internal/config"
 )
 
-// spicetifyFAQURL is the documented source for obtaining a Musixmatch token; the
-// banner must link to it (#385).
+// spicetifyFAQURL was once linked from the banner as a way to obtain a Musixmatch
+// token by hand (#385). It is now asserted ABSENT: serve mode provisions a token
+// automatically and retries on a later start, so the banner's actionable remedies
+// are Settings and the tokenless provider. Walking an operator through extracting
+// a credential out of another application's traffic is not guidance canticle
+// ships, and this constant is retained purely so the assertion below keeps the
+// link from being reintroduced.
 const spicetifyFAQURL = "https://spicetify.app/docs/faq#sometimes-popup-lyrics-andor-lyrics-plus-seem-to-not-work"
 
 // renderShell mounts a (public, no-auth) UI and fetches the Reports workspace
@@ -38,11 +43,10 @@ func TestMusixmatchInactiveBannerRendersWhenInactive(t *testing.T) {
 	if !strings.Contains(body, `href="/settings"`) {
 		t.Fatal("banner must link to /settings to add the token")
 	}
-	if !strings.Contains(body, spicetifyFAQURL) {
-		t.Fatalf("banner must link to the Spicetify FAQ (%s)", spicetifyFAQURL)
-	}
-	if !strings.Contains(body, `rel="noopener noreferrer"`) {
-		t.Fatal("the external FAQ link must carry rel=\"noopener noreferrer\"")
+	// The banner must NOT teach the operator to obtain a token by hand. This is the
+	// inverse of the original #385 assertion and exists to stop the link coming back.
+	if strings.Contains(body, spicetifyFAQURL) {
+		t.Fatalf("banner must not link to a manual token-extraction guide (%s)", spicetifyFAQURL)
 	}
 	if !strings.Contains(body, "Musixmatch") {
 		t.Fatal("banner copy must mention Musixmatch")

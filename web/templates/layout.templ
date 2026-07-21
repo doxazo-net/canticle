@@ -73,9 +73,14 @@ templ Layout(title string, active string, version string, reports []RailItem, pa
 // with Musixmatch inactive because no token was configured (#385). It states
 // Musixmatch is disabled (without claiming all fetching is off, since a tokenless
 // provider may be covering), links to Settings to add a token or switch to a
-// tokenless provider (PetitLyrics, which also handles CJK lyrics well), and links
-// to the Spicetify FAQ for obtaining a token (new tab, noopener/noreferrer). The
+// tokenless provider (PetitLyrics, which also handles CJK lyrics well). The
 // copy notes a restart is needed because the token is read at startup.
+//
+// It deliberately does NOT tell the operator how to obtain a token by hand.
+// Serve mode provisions one automatically and retries on a later start, so the
+// two remedies named here are the actionable ones; walking a user through
+// extracting a credential out of another application's traffic is not guidance
+// canticle ships.
 templ musixmatchBanner() {
 	<div class="mx-banner" role="status">
 		<svg class="mx-banner-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -91,8 +96,6 @@ templ musixmatchBanner() {
 				start. In
 				<a class="mx-banner-link" href="/settings">Settings</a> you can add a token (then restart) to enable it,
 				or switch the provider to PetitLyrics, which needs no token and handles CJK lyrics well.
-				To obtain a Musixmatch token by hand, see the
-				<a class="mx-banner-link" href="https://spicetify.app/docs/faq#sometimes-popup-lyrics-andor-lyrics-plus-seem-to-not-work" target="_blank" rel="noopener noreferrer">Spicetify FAQ</a>.
 			</p>
 		</div>
 	</div>
