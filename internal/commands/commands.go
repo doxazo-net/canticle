@@ -909,6 +909,11 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		return 1
 	}
 
+	// operatorSupplied records whether a token arrived from CLI/env/TOML, before
+	// the lower tiers can substitute one. It gates both auto-minting and renewal:
+	// an operator credential is never overwritten (#554).
+	operatorSupplied := strings.TrimSpace(token) != ""
+
 	// DB is the lowest-precedence source for both secrets: consulted only when the
 	// higher tiers (CLI/env/TOML) are empty, and a DB-sourced value is never
 	// auto-persisted back.
@@ -918,6 +923,23 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		slog.Error("failed to resolve musixmatch token", "error", err)
 		return 1
 	}
+	// Lowest tier of all: with every other source empty, mint a token and persist
+	// it so the deployment is zero-config (#554). A stored or operator-supplied
+	// token short-circuits this, which is what keeps a restart from re-minting --
+	// the mint endpoint is rate limited, so a re-minting restart loop would lock
+	// itself out.
+	tokenMinterImpl := musixmatch.NewTokenMinter(nil)
+	token, _ = bootstrapToken(ctx, token, tokenFromDB, store, tokenMinterImpl)
+
+	// tokenRenewer is installed only when no operator credential is in play. It
+	// fires solely on the API's explicit hint=renew signal, never on a bare 401
+	// (observed behavior attributes those to throttling, and renewing on them
+	// would burn rate-limited mints during the exact window they are refused).
+	var tokenRenewer musixmatch.TokenRenewer
+	if !operatorSupplied && store != nil {
+		tokenRenewer = &persistingRenewer{minter: tokenMinterImpl, store: store}
+	}
+
 	webhookKeys, webhookFromDB, err := resolveWebhookKeysWithStore(ctx, cfg.Server.WebhookAPIKeys, store)
 	if err != nil {
 		_ = sqlDB.Close()
@@ -953,6 +975,17 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// the worker/scheduler never start (the queue is left untouched rather than
 	// churned into permanent miss retirements).
 	fetcher, selErr := selectedProvider(cfg, token, newFetcher)
+	// Attach the renewer to the concrete Musixmatch client when one was built. The
+	// assertion is deliberately best-effort: petitlyrics and the degraded no-op
+	// provider have no token to renew, so a failed assertion is the expected
+	// no-token path, not an error.
+	if tokenRenewer != nil {
+		if mc, ok := fetcher.(interface {
+			SetTokenRenewer(musixmatch.TokenRenewer)
+		}); ok {
+			mc.SetTokenRenewer(tokenRenewer)
+		}
+	}
 	fetcher, musixmatchInactive, lyricsDisabled, err := resolveServeProvider(fetcher, selErr)
 	if err != nil {
 		_ = sqlDB.Close()

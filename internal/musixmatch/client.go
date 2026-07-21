@@ -134,10 +134,31 @@ func IsBenignMiss(err error) bool {
 	return errors.Is(err, ErrNotFound) || errors.Is(err, ErrNoLyrics)
 }
 
+// TokenRenewer supplies a replacement token when the API explicitly signals that
+// the current one is finished. It is deliberately narrow: the ONLY trigger is the
+// body-level hint=renew signal (see ErrTokenRenewalRequired), never a bare HTTP
+// 401, which observed behavior says is usually an egress/token throttle rather
+// than a dead credential (#554).
+type TokenRenewer interface {
+	Renew(ctx context.Context) (string, error)
+}
+
 // Client communicates with the Musixmatch desktop API.
 type Client struct {
+	// Token is the initial token. Read it through currentToken(), which also sees
+	// a token installed later by a renewal.
 	Token      string
 	httpClient *http.Client
+
+	// tokenMu guards the renewed token. It is separate from mu (the pacer lock) so
+	// a token read can never nest inside the pacing critical section.
+	tokenMu sync.RWMutex
+	// renewedToken, when non-empty, supersedes Token after a successful renewal.
+	renewedToken string
+	// renewer, when non-nil, mints a replacement token on the hint=renew signal.
+	// Nil disables renewal entirely, which is the behavior for every caller that
+	// supplies its own operator token.
+	renewer TokenRenewer
 
 	// pacer fields -- zero value means no pacing (minInterval == 0).
 	mu          sync.Mutex
@@ -159,6 +180,39 @@ type Client struct {
 	// occurred, since there is nothing to decay from and no meaningful elapsed
 	// window to measure.
 	lastLevelChange time.Time
+}
+
+// SetTokenRenewer installs the renewer consulted when the API signals
+// hint=renew. A nil renewer leaves renewal disabled.
+func (c *Client) SetTokenRenewer(r TokenRenewer) {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	c.renewer = r
+}
+
+// currentToken returns the token to send: the renewed one when a renewal has
+// succeeded, otherwise the token supplied at construction.
+func (c *Client) currentToken() string {
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	if c.renewedToken != "" {
+		return c.renewedToken
+	}
+	return c.Token
+}
+
+// installRenewedToken records a freshly minted token for subsequent requests.
+func (c *Client) installRenewedToken(tok string) {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	c.renewedToken = tok
+}
+
+// tokenRenewer returns the configured renewer, or nil.
+func (c *Client) tokenRenewer() TokenRenewer {
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	return c.renewer
 }
 
 // NewClient creates a new Musixmatch API client.
@@ -358,7 +412,40 @@ func (c *Client) Name() string {
 }
 
 // FindLyrics looks up lyrics for the given track from the Musixmatch API.
+//
+// When the API answers with the explicit hint=renew signal and a renewer is
+// installed, it mints a replacement token, installs it, and retries the request
+// EXACTLY ONCE (#554). The retry is deliberately bounded: a renewal that fails,
+// is refused, or is followed by a second renewal signal returns the error rather
+// than looping, because the mint endpoint is itself rate-limited and a retry loop
+// would lock the deployment out of it entirely.
+//
+// A bare HTTP 401 never triggers renewal. errors.Is(err, ErrTokenRenewalRequired)
+// matches only the body-level hint=renew case; the bare 401 path returns
+// ErrUnauthorized, which observed behavior attributes to throttling rather than a
+// dead credential.
 func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Song, error) {
+	song, err := c.findLyricsOnce(ctx, track)
+	if err == nil || !errors.Is(err, ErrTokenRenewalRequired) {
+		return song, err
+	}
+	renewer := c.tokenRenewer()
+	if renewer == nil {
+		return song, err
+	}
+	tok, rerr := renewer.Renew(ctx)
+	if rerr != nil {
+		slog.Warn("musixmatch signaled token renewal but minting a replacement failed",
+			"error", rerr)
+		return song, err
+	}
+	c.installRenewedToken(tok)
+	slog.Info("musixmatch signaled token renewal; installed a freshly minted token and retrying once")
+	return c.findLyricsOnce(ctx, track)
+}
+
+// findLyricsOnce performs a single lookup with the currently installed token.
+func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models.Song, error) {
 	if err := c.pace(ctx); err != nil {
 		return models.Song{}, err
 	}
@@ -372,7 +459,7 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 		"namespace":         {"lyrics_richsynched"},
 		"subtitle_format":   {"mxm"},
 		"app_id":            {"web-desktop-app-v1.0"},
-		"usertoken":         {c.Token},
+		"usertoken":         {c.currentToken()},
 		"q_album":           {track.AlbumName},
 		"q_artist":          {track.ArtistName},
 		"q_artists":         {track.ArtistName},
