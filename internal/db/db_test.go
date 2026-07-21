@@ -796,7 +796,7 @@ func TestMigration032BackfillsAlbumFromScanResults(t *testing.T) {
 		t.Fatalf("UpTo(32): %v", err)
 	}
 
-	get := func(id int64) (string, string) {
+	get := func(t *testing.T, id int64) (string, string) {
 		t.Helper()
 		var album, aa string
 		if err := sqlDB.QueryRowContext(ctx, `SELECT album, album_artist FROM work_queue WHERE id = ?`, id).Scan(&album, &aa); err != nil {
@@ -805,22 +805,25 @@ func TestMigration032BackfillsAlbumFromScanResults(t *testing.T) {
 		return album, aa
 	}
 
-	if album, aa := get(wqA); album != "Album A" || aa != "AA A" {
-		t.Errorf("A backfill: got %q/%q; want Album A / AA A", album, aa)
-	}
-	if album, aa := get(wqB); album != "Existing B" || aa != "Existing AA B" {
-		t.Errorf("B must not overwrite: got %q/%q; want Existing B / Existing AA B", album, aa)
-	}
-	if album, _ := get(wqC); album != "" {
-		t.Errorf("C (no link): album=%q; want empty", album)
-	}
-	if album, _ := get(wqD); album != "" {
-		t.Errorf("D (empty source): album=%q; want empty", album)
-	}
-	if album, aa := get(wqE); album != "Set E" || aa != "Backfill AA E" {
-		t.Errorf("E independent: got %q/%q; want Set E / Backfill AA E", album, aa)
-	}
-	if album, aa := get(wqF); album != "Album F" || aa != "AA F" {
-		t.Errorf("F multi-link: got %q/%q; want Album F / AA F (lowest-id non-empty source)", album, aa)
+	// Each case asserted in its own subtest so a failure is isolated and
+	// -run-filterable per scenario. Setup (seed + single UpTo(32)) is shared above.
+	for _, tc := range []struct {
+		name              string
+		id                int64
+		wantAlbum, wantAA string
+	}{
+		{"A_backfilled_from_linked_source", wqA, "Album A", "AA A"},
+		{"B_existing_value_not_overwritten", wqB, "Existing B", "Existing AA B"},
+		{"C_no_linked_source_stays_empty", wqC, "", ""},
+		{"D_empty_source_stays_empty", wqD, "", ""},
+		{"E_album_kept_album_artist_backfilled_independently", wqE, "Set E", "Backfill AA E"},
+		{"F_multi_link_picks_lowest_id_non_empty", wqF, "Album F", "AA F"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			album, aa := get(t, tc.id)
+			if album != tc.wantAlbum || aa != tc.wantAA {
+				t.Errorf("album/album_artist = %q/%q; want %q/%q", album, aa, tc.wantAlbum, tc.wantAA)
+			}
+		})
 	}
 }
