@@ -20,9 +20,7 @@ The token is a long opaque string (it is not your Musixmatch account password).
 
 You may still want to supply your own, for example if you already have one or you are running somewhere the automatic request is refused. A token you supply always takes precedence and is never overwritten.
 
-### Obtaining a token by hand (optional)
-
-If you need to provision one yourself, follow steps 1 to 5 of the [Spicetify FAQ](https://spicetify.app/docs/faq#sometimes-popup-lyrics-andor-lyrics-plus-seem-to-not-work). In our words: install the Spicetify lyrics setup it describes, open your browser developer tools on the network tab while lyrics load, find the Musixmatch request, and copy the `usertoken` value out of its query string. That copied string is your token.
+### Supplying a token you already have
 
 The quickest way to provision it for a shell session:
 
