@@ -389,7 +389,7 @@ func (c *Client) request(ctx context.Context, track models.Track, tier int) ([]a
 	if err := c.pace(ctx); err != nil {
 		return nil, err
 	}
-	res, err := c.httpClient.Do(req) //nolint:gosec // G704: the request host is c.baseURL (a fixed const, test-only override) and CheckRedirect pins redirects to that host, so a 3xx cannot move the request off-host; track inputs go in the form body, not the URL. No SSRF vector.
+	res, err := c.httpClient.Do(req) //nolint:gosec // reason: G704 - the request host is c.baseURL (a fixed const, test-only override) and CheckRedirect pins redirects to that host, so a 3xx cannot move the request off-host; track inputs go in the form body, not the URL. No SSRF vector.
 	if err != nil {
 		return nil, fmt.Errorf("petitlyrics: request: %w", err)
 	}
