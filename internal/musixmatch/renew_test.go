@@ -6,7 +6,9 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/models"
 )
@@ -154,6 +156,71 @@ func TestFindLyrics_RetriesAtMostOnce(t *testing.T) {
 	if len(*sent) != 2 {
 		t.Errorf("requests = %d; want exactly 2", len(*sent))
 	}
+}
+
+// TestFindLyrics_ConcurrentRenewalMintsOnce is the single-flight guard. The mint
+// endpoint is rate limited (three rapid mints from one egress were measured to
+// all return 401), so concurrent hint=renew signals must produce ONE mint. Without
+// serialization this feature triggers the exact lockout it exists to prevent.
+func TestFindLyrics_ConcurrentRenewalMintsOnce(t *testing.T) {
+	const goroutines = 8
+
+	var mu sync.Mutex
+	seenTokens := map[string]int{}
+
+	c := NewClient("original-token")
+	c.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		tok := req.URL.Query().Get("usertoken")
+		mu.Lock()
+		seenTokens[tok]++
+		mu.Unlock()
+		// The original token always draws the renewal signal; the renewed one
+		// resolves to a benign miss, ending the retry.
+		if tok == "original-token" {
+			return respond(http.StatusOK, renewSignalBody), nil
+		}
+		return respond(http.StatusOK, missBody), nil
+	})}
+
+	// A renewer that blocks briefly, widening the window in which a second
+	// goroutine could mint concurrently if the path were not serialized.
+	r := &slowRenewer{token: "renewed-token", delay: 20 * time.Millisecond}
+	c.SetTokenRenewer(r)
+
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = c.FindLyrics(context.Background(), models.Track{ArtistName: "A", TrackName: "T"})
+		}()
+	}
+	wg.Wait()
+
+	if got := r.Calls(); got != 1 {
+		t.Errorf("mints = %d; want exactly 1 across %d concurrent renewals", got, goroutines)
+	}
+}
+
+type slowRenewer struct {
+	token string
+	delay time.Duration
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *slowRenewer) Renew(context.Context) (string, error) {
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+	time.Sleep(s.delay)
+	return s.token, nil
+}
+
+func (s *slowRenewer) Calls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
 }
 
 // TestFindLyrics_NoRenewerLeavesBehaviorUnchanged covers every caller that

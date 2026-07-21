@@ -6,7 +6,7 @@ A fully commented `config.example.toml` ships in the repository root; copy it an
 
 ## Token precedence
 
-A Musixmatch API token is required. Supply it using any of the following methods, listed in order of precedence (highest first):
+A Musixmatch API token is required for the one-shot `fetch` CLI, and optional in serve mode (which provisions and stores one itself). When you do supply one, these are the sources in order of precedence (highest first):
 
 1. **`--token` CLI flag** - highest priority.
    ```sh
@@ -54,7 +54,7 @@ The table below is the complete env-var surface; the watcher and verification se
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `MUSIXMATCH_TOKEN` | (required) | Musixmatch API token. `MXLRC_API_TOKEN` is accepted as a lower-precedence alias. |
+| `MUSIXMATCH_TOKEN` | (auto-provisioned in serve mode; required for `fetch`) | Musixmatch API token. `MXLRC_API_TOKEN` is accepted as a lower-precedence alias. |
 | `MXLRC_WEBHOOK_API_KEY` | (none) | Comma-separated webhook API key(s) accepted by the server. Generate with `canticle keys create --scope webhook`. |
 | `MXLRC_SERVER_ADDR` | `127.0.0.1:3876` | HTTP listen address for `serve`. Docker images default this to `0.0.0.0:50705`. |
 | `MXLRC_WEB_UI_ENABLED` | `false` | Enable the browser UI on the serve listener. Env override of `web_ui_enabled` (precedence: env > file). Restart to apply. |

@@ -155,6 +155,11 @@ type Client struct {
 	tokenMu sync.RWMutex
 	// renewedToken, when non-empty, supersedes Token after a successful renewal.
 	renewedToken string
+	// renewMu single-flights the renewal path so concurrent hint=renew signals
+	// produce ONE mint rather than one per goroutine. It is held across the mint
+	// call, so it is deliberately NOT tokenMu (which must stay uncontended for
+	// per-request token reads).
+	renewMu sync.Mutex
 	// renewer, when non-nil, mints a replacement token on the hint=renew signal.
 	// Nil disables renewal entirely, which is the behavior for every caller that
 	// supplies its own operator token.
@@ -433,13 +438,30 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 	if renewer == nil {
 		return song, err
 	}
+
+	// Single-flight the renewal. FindLyrics may be called concurrently, and the
+	// mint endpoint is rate limited (three rapid mints from one egress were
+	// measured to all return 401), so N goroutines seeing hint=renew together must
+	// produce ONE mint, not N. Without this the feature triggers the exact lockout
+	// it exists to avoid.
+	staleToken := c.currentToken()
+	c.renewMu.Lock()
+	if c.currentToken() != staleToken {
+		// Another goroutine renewed while this one waited. Use its token rather
+		// than minting a second time.
+		c.renewMu.Unlock()
+		slog.Debug("musixmatch token was renewed concurrently; retrying with the existing replacement")
+		return c.findLyricsOnce(ctx, track)
+	}
 	tok, rerr := renewer.Renew(ctx)
 	if rerr != nil {
+		c.renewMu.Unlock()
 		slog.Warn("musixmatch signaled token renewal but minting a replacement failed",
 			"error", rerr)
 		return song, err
 	}
 	c.installRenewedToken(tok)
+	c.renewMu.Unlock()
 	slog.Info("musixmatch signaled token renewal; installed a freshly minted token and retrying once")
 	return c.findLyricsOnce(ctx, track)
 }

@@ -8,7 +8,7 @@ Canticle fetches synced lyrics from [Musixmatch](https://www.musixmatch.com/) an
 - **Have a music library on disk?** Point the tool at a folder and it writes a lyric file next to each track. See [Directory mode](#directory-mode).
 - **Use Lidarr, or run containers?** Run it as a long-lived service that accepts Lidarr webhooks and scans your libraries on a schedule. See [Daemon / serve](#daemon-serve). If you do not know what Lidarr is, you probably do not need it.
 
-Every path needs a Musixmatch token first.
+Serve mode obtains a Musixmatch token on its own; the one-shot `fetch` CLI needs one supplied.
 
 ## Get a Musixmatch token
 
