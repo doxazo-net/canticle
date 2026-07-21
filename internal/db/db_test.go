@@ -706,3 +706,124 @@ func TestMigration022LaneAttemptsUpDown(t *testing.T) {
 		t.Fatal("idx_lane_attempts_lane still present after down-migration")
 	}
 }
+
+// TestMigration032BackfillsAlbumFromScanResults drives migration 032: it
+// migrates to v31, seeds work_queue rows with empty (or set) album/album_artist
+// linked (or not) to scan_results, applies 032, and asserts the values are
+// backfilled from the linked scan_result only where the queue value is empty and
+// a non-empty source exists -- never overwriting an existing value, and album /
+// album_artist backfilling independently.
+func TestMigration032BackfillsAlbumFromScanResults(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "mig032.db")
+	sqlDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	applyOpenPragmas(ctx, t, sqlDB)
+
+	migFS, err := fs.Sub(migrations, "migrations")
+	if err != nil {
+		t.Fatalf("sub migrations fs: %v", err)
+	}
+	provider, err := goose.NewProvider(goose.DialectSQLite3, sqlDB, migFS)
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	if _, err := provider.UpTo(ctx, 31); err != nil {
+		t.Fatalf("UpTo(31): %v", err)
+	}
+
+	exec := func(q string, args ...any) sql.Result {
+		t.Helper()
+		res, err := sqlDB.ExecContext(ctx, q, args...)
+		if err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		return res
+	}
+	lastID := func(res sql.Result) int64 {
+		t.Helper()
+		id, err := res.LastInsertId()
+		if err != nil {
+			t.Fatalf("last insert id: %v", err)
+		}
+		return id
+	}
+
+	libID := lastID(exec(`INSERT INTO libraries (path, name) VALUES ('/music', 'lib')`))
+	seedWQ := func(key, album, albumArtist string) int64 {
+		return lastID(exec(
+			`INSERT INTO work_queue (artist, title, artist_key, title_key, album, album_artist, status, next_attempt_at)
+             VALUES (?, 'T', ?, ?, ?, ?, 'deferred', '2026-01-01T00:00:00Z')`,
+			key, key, key, album, albumArtist))
+	}
+	seedSR := func(file, album, albumArtist string) int64 {
+		return lastID(exec(
+			`INSERT INTO scan_results (library_id, file_path, album, album_artist) VALUES (?, ?, ?, ?)`,
+			libID, file, album, albumArtist))
+	}
+	link := func(wqID, srID int64) {
+		exec(`INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`, wqID, srID)
+	}
+
+	// A: empty album+album_artist, linked to a source that HAS both -> both backfilled.
+	wqA := seedWQ("a", "", "")
+	link(wqA, seedSR("/a.flac", "Album A", "AA A"))
+	// B: both already set, linked to a source with DIFFERENT values -> unchanged.
+	wqB := seedWQ("b", "Existing B", "Existing AA B")
+	link(wqB, seedSR("/b.flac", "Other B", "Other AA B"))
+	// C: empty, NO linked source -> stays empty.
+	wqC := seedWQ("c", "", "")
+	// D: empty, linked source is also EMPTY -> stays empty.
+	wqD := seedWQ("d", "", "")
+	link(wqD, seedSR("/d.flac", "", ""))
+	// E: album set but album_artist empty -> album kept, album_artist backfilled (independent).
+	wqE := seedWQ("e", "Set E", "")
+	link(wqE, seedSR("/e.flac", "Ignored E", "Backfill AA E"))
+	// F: collapsed-files fan-out -- one row linked to THREE scan_results. The
+	// lowest-id source is EMPTY, so the WHERE sr.album <> '' filter must skip it
+	// and ORDER BY sr.id LIMIT 1 must pick the lowest-id NON-empty one (F middle),
+	// not the empty first nor the higher-id third. Exercises the multi-link branch
+	// the join table exists for.
+	wqF := seedWQ("f", "", "")
+	link(wqF, seedSR("/f1.flac", "", ""))                  // lowest id, empty  -> skipped
+	link(wqF, seedSR("/f2.flac", "Album F", "AA F"))       // next id, non-empty -> chosen
+	link(wqF, seedSR("/f3.flac", "Other F", "Other AA F")) // highest id, non-empty -> not chosen
+
+	if _, err := provider.UpTo(ctx, 32); err != nil {
+		t.Fatalf("UpTo(32): %v", err)
+	}
+
+	get := func(t *testing.T, id int64) (string, string) {
+		t.Helper()
+		var album, aa string
+		if err := sqlDB.QueryRowContext(ctx, `SELECT album, album_artist FROM work_queue WHERE id = ?`, id).Scan(&album, &aa); err != nil {
+			t.Fatalf("get %d: %v", id, err)
+		}
+		return album, aa
+	}
+
+	// Each case asserted in its own subtest so a failure is isolated and
+	// -run-filterable per scenario. Setup (seed + single UpTo(32)) is shared above.
+	for _, tc := range []struct {
+		name              string
+		id                int64
+		wantAlbum, wantAA string
+	}{
+		{"A_backfilled_from_linked_source", wqA, "Album A", "AA A"},
+		{"B_existing_value_not_overwritten", wqB, "Existing B", "Existing AA B"},
+		{"C_no_linked_source_stays_empty", wqC, "", ""},
+		{"D_empty_source_stays_empty", wqD, "", ""},
+		{"E_album_kept_album_artist_backfilled_independently", wqE, "Set E", "Backfill AA E"},
+		{"F_multi_link_picks_lowest_id_non_empty", wqF, "Album F", "AA F"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			album, aa := get(t, tc.id)
+			if album != tc.wantAlbum || aa != tc.wantAA {
+				t.Errorf("album/album_artist = %q/%q; want %q/%q", album, aa, tc.wantAlbum, tc.wantAA)
+			}
+		})
+	}
+}
