@@ -22,7 +22,9 @@ A Musixmatch API token is required. Supply it using any of the following methods
    MUSIXMATCH_TOKEN=YOUR_TOKEN
    ```
 
-To obtain a token, follow steps 1 to 5 from the [Spicetify guide](https://spicetify.app/docs/faq#sometimes-popup-lyrics-andor-lyrics-plus-seem-to-not-work).
+In serve mode a token is optional: when none is configured, canticle obtains one automatically on first run and persists it in the encrypted secret store, reusing it on later starts. A token you configure here always takes precedence and is never overwritten by that automatic path. The one-shot `fetch` CLI is stateless and has no secret store, so it cannot persist a token and still requires one.
+
+If automatic setup is unavailable, obtain a token by hand with steps 1 to 5 from the [Spicetify guide](https://spicetify.app/docs/faq#sometimes-popup-lyrics-andor-lyrics-plus-seem-to-not-work).
 
 ## General precedence
 

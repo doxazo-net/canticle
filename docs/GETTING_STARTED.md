@@ -12,9 +12,17 @@ Every path needs a Musixmatch token first.
 
 ## Get a Musixmatch token
 
-A Musixmatch API token is required. Without one, every fetch returns a `401` and no lyrics are written. The token is a long opaque string (it is not your Musixmatch account password).
+In **serve mode**, a Musixmatch API token is optional. On first run canticle requests one automatically and stores it in its encrypted secret store, then reuses that stored token on every later start. For most installs there is nothing to do here.
 
-To obtain a token, follow steps 1 to 5 of the [Spicetify FAQ](https://spicetify.app/docs/faq#sometimes-popup-lyrics-andor-lyrics-plus-seem-to-not-work). In our words: install the Spicetify lyrics setup it describes, open your browser developer tools on the network tab while lyrics load, find the Musixmatch request, and copy the `usertoken` value out of its query string. That copied string is your token.
+The one-shot `fetch` CLI keeps no state and has no secret store, so it cannot save a token for reuse. It still needs one supplied explicitly, via `--token`, `MUSIXMATCH_TOKEN`, or a config file.
+
+The token is a long opaque string (it is not your Musixmatch account password).
+
+You may still want to supply your own, for example if you already have one or you are running somewhere the automatic request is refused. A token you supply always takes precedence and is never overwritten.
+
+### Obtaining a token by hand (optional)
+
+If you need to provision one yourself, follow steps 1 to 5 of the [Spicetify FAQ](https://spicetify.app/docs/faq#sometimes-popup-lyrics-andor-lyrics-plus-seem-to-not-work). In our words: install the Spicetify lyrics setup it describes, open your browser developer tools on the network tab while lyrics load, find the Musixmatch request, and copy the `usertoken` value out of its query string. That copied string is your token.
 
 The quickest way to provision it for a shell session:
 
@@ -160,7 +168,7 @@ See the [User Guide](USER_GUIDE.md#inspection-commands) for the full inspection 
 
 ## Troubleshooting
 
-- **`401` / token rejected.** The token is missing, wrong, or expired. Re-check the [precedence](#get-a-musixmatch-token): a `--token` flag or a stale environment variable can silently override the one you think you are using. Confirm with `--token` explicitly, then re-provision a fresh token from the Spicetify FAQ.
+- **`401` is usually throttling, not a dead token.** A bare `401` most often means the request was throttled, not that the credential expired. This is measured, not assumed: a token that was working began returning `401` after a few closely spaced requests, then worked normally again later. So the first thing to try is slowing down (raise `MXLRC_API_COOLDOWN`), not re-provisioning. A genuinely finished credential is reported differently, and canticle handles that case itself by obtaining a replacement and retrying. If `401`s persist across a long quiet period, then re-check the [precedence](#get-a-musixmatch-token): a `--token` flag or a stale environment variable can silently override the token you think you are using.
 - **Rate limiting / circuit breaker.** When Musixmatch signals throttling, the worker opens a circuit breaker and pauses dequeuing globally to back off. If you hit this often, raise the request cooldown with `MXLRC_API_COOLDOWN` (seconds between requests). See [Configuration](CONFIGURATION.md#environment-variables) for the cooldown and circuit-breaker variables.
 - **Benign miss / `deferred`.** A track Musixmatch has no lyrics for yet lands in `queue deferred`, not `queue failed`. This is not a failure; the row waits out a cooldown and re-checks itself later.
 - **Unraid `/mnt/user` watcher caveat.** The optional filesystem watcher relies on inotify events, which Unraid `/mnt/user` (FUSE/shfs) mounts often do not deliver into the container. Keep the periodic scan as the source of truth there; do not set the scan interval to `0`. Note the watcher switch is `MXLRCGO_WATCH_ENABLED` (the `MXLRCGO_` prefix, not `MXLRC_`).
