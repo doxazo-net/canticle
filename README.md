@@ -100,7 +100,9 @@ Renamed an audio file and left its `.lrc`/`.txt` behind? `canticle realign` re-a
 
 ## Token
 
-A Musixmatch API token is required. Supply it via the `--token` CLI flag, the `MUSIXMATCH_TOKEN` environment variable, or a `.env`/config file, in that order of precedence (CLI > env > file). To get a token, follow steps 1 to 5 from the [Spicetify guide](https://spicetify.app/docs/faq#sometimes-popup-lyrics-andor-lyrics-plus-seem-to-not-work). See [Configuration](https://sydlexius.github.io/canticle/CONFIGURATION/) for the full env-var and TOML surface.
+In **serve mode**, a Musixmatch API token is optional: on first run canticle obtains one automatically and stores it encrypted at rest, reusing it on every later start, so there is nothing to set up. The one-shot `fetch` CLI keeps no state, so it cannot store a token and still needs one supplied explicitly.
+
+To supply your own instead, prefer `canticle secrets set musixmatch_token`, which reads the value from stdin and stores it encrypted at rest, keeping it out of shell history and process listings. The `--token` CLI flag, the `MUSIXMATCH_TOKEN` environment variable, and a `.env`/config file remain supported, in that order of precedence (CLI > env > file). A token you supply always takes precedence and is never overwritten. If automatic setup is unavailable, you can obtain one by hand with steps 1 to 5 from the [Spicetify guide](https://spicetify.app/docs/faq#sometimes-popup-lyrics-andor-lyrics-plus-seem-to-not-work). See [Configuration](https://sydlexius.github.io/canticle/CONFIGURATION/) for the full env-var and TOML surface.
 
 ## Encrypted secrets
 
