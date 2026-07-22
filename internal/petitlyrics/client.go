@@ -302,13 +302,36 @@ func (c *Client) lookup(ctx context.Context, track models.Track, tier int) (mode
 
 	switch classifyPayload(raw) {
 	case tierWordSync:
-		cues, _, err := decodeWordSync(raw)
+		cues, timings, err := decodeWordSync(raw)
 		if err != nil {
 			return models.Song{}, err
 		}
 		// Run the shared normalizer so this lane holds the same one-cue-per-line
 		// model as every other write path (#470).
-		song.Subtitles = lrcnormalize.Expand(models.Synced{Lines: cues})
+		expanded := lrcnormalize.Expand(models.Synced{Lines: cues})
+		song.Subtitles = expanded
+		// Word timings are positional indices into the cue slice, so they are only
+		// safe to attach when no cue was SPLIT. Expand splits a cue whose TEXT
+		// carries an embedded timestamp, which shifts every later index and would
+		// leave the timings pointing at the wrong words.
+		//
+		// The length comparison detects a split, which is not the same as proving
+		// the order is unchanged: Expand ends in a sort, so in general it can
+		// reorder at constant length. That cannot happen HERE because
+		// decodeWordSync sorts by first-word start time before assigning indices
+		// and msToTime is monotone, making Expand's stable sort a no-op on this
+		// path -- an invariant defended by
+		// TestDecodeWordSync_OrderingIsStableThroughExpand. If that sort is ever
+		// removed, this check stops being sufficient.
+		if len(expanded.Lines) == len(cues) {
+			song.WordTimings = timings
+		} else {
+			// Info, not Debug: this silently demotes a result a full quality tier,
+			// and it should be rare. If it ever becomes common that signals a
+			// payload-shape change worth noticing in production.
+			slog.Info("petitlyrics: cue normalization split a line; dropping word timings",
+				"track", track.TrackName, "before", len(cues), "after", len(expanded.Lines))
+		}
 		return song, nil
 
 	case tierLineSync:
