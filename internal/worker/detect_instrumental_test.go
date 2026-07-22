@@ -188,8 +188,13 @@ func TestCircuitSettersReachDetectorBreaker(t *testing.T) {
 	// the deadline would be built from the real wall clock instead.
 	frozen := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	w.setClock(func() time.Time { return frozen })
+	// Order matters: SetCircuitBackoff runs FIRST with a distinct (smaller) cap,
+	// so SetCircuitOpenDuration is the only call that can raise the window to
+	// 90m. Setting them the other way round -- or with the same cap -- lets
+	// SetCircuitBackoff reapply the expected value and masks a missing
+	// SetCircuitOpenDuration fan-out entirely.
+	w.SetCircuitBackoff(90*time.Minute, 30*time.Minute)
 	w.SetCircuitOpenDuration(90 * time.Minute)
-	w.SetCircuitBackoff(90*time.Minute, 90*time.Minute)
 
 	w.detectorBreaker.Trip()
 	got := w.detectorBreaker.OpenUntil()
