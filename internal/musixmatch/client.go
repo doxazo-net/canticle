@@ -477,7 +477,17 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 		return song, fmt.Errorf("failed to parse API URL: %w", err)
 	}
 	params := url.Values{
-		"format":            {"json"},
+		"format": {"json"},
+		// NEGATIVE RESULT, probed live 2026-07-22 (12 mainstream tracks): this
+		// namespace does NOT cause macro.subtitles.get to return a richsync
+		// (word-level) macro call. Every response carried exactly five:
+		// matcher.track.get, track.lyrics.get, track.snippet.get,
+		// track.subtitles.get, userblob.get. So the parser below is not silently
+		// dropping word-level timing -- none arrives. Word-level timing is only
+		// reachable from a non-Musixmatch source today. Recorded here so the
+		// "we already ask for richsync, we must be discarding it" hypothesis is
+		// not re-derived from this string. The parameter is kept because the
+		// request shape is otherwise unchanged and untested to remove.
 		"namespace":         {"lyrics_richsynched"},
 		"subtitle_format":   {"mxm"},
 		"app_id":            {"web-desktop-app-v1.0"},
