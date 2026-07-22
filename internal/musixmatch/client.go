@@ -478,16 +478,25 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 	}
 	params := url.Values{
 		"format": {"json"},
-		// NEGATIVE RESULT, probed live 2026-07-22 (12 mainstream tracks): this
-		// namespace does NOT cause macro.subtitles.get to return a richsync
-		// (word-level) macro call. Every response carried exactly five:
-		// matcher.track.get, track.lyrics.get, track.snippet.get,
-		// track.subtitles.get, userblob.get. So the parser below is not silently
-		// dropping word-level timing -- none arrives. Word-level timing is only
-		// reachable from a non-Musixmatch source today. Recorded here so the
-		// "we already ask for richsync, we must be discarding it" hypothesis is
-		// not re-derived from this string. The parameter is kept because the
-		// request shape is otherwise unchanged and untested to remove.
+		// This namespace does NOT make macro.subtitles.get return word-level
+		// (richsync) timing. Probed live 2026-07-22 over 12 mainstream tracks:
+		// every response carried exactly five macro calls -- matcher.track.get,
+		// track.lyrics.get, track.snippet.get, track.subtitles.get,
+		// userblob.get -- and never a richsync one. So the parser below is not
+		// silently dropping word-level data on THIS endpoint; none arrives here.
+		//
+		// Word-level timing IS available on this token, from a DIFFERENT
+		// endpoint: track.richsync.get, keyed by the commontrack_id that
+		// matcher.track.get returns. Measured the same day, 6 of 9 matched
+		// mainstream tracks had a richsync body (schema {l,te,ts,x}; absolute
+		// word time = ts + o). It is a two-step flow, which is why no
+		// single-request probe of this endpoint could ever find it.
+		//
+		// Both halves are recorded here because the first, alone, invites the
+		// false conclusion that word-level timing is unreachable from
+		// Musixmatch. It is not -- it is reachable, just not from here.
+		// The parameter is kept because the request shape is otherwise
+		// unchanged and untested to remove.
 		"namespace":         {"lyrics_richsynched"},
 		"subtitle_format":   {"mxm"},
 		"app_id":            {"web-desktop-app-v1.0"},
