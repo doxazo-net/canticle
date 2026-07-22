@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/circuit"
 	"github.com/sydlexius/canticle/internal/models"
@@ -164,5 +165,36 @@ func TestDetectorBreakerStateSurvivesRebuild(t *testing.T) {
 	}
 	if got := rebuilt.Breaker().Allow(); got != circuit.StateOpen {
 		t.Errorf("breaker state after rebuild = %v; want StateOpen (a tripped detector must stay tripped)", got)
+	}
+}
+
+// TestCircuitSettersReachDetectorBreaker verifies the circuit-config setters fan
+// out to the detector breaker (#531).
+//
+// This became load-bearing only once the breaker started surviving rebuilds.
+// Previously each rebuild constructed a fresh breaker from the worker's current
+// config, so a setter that skipped it was invisible. A long-lived breaker would
+// instead keep whatever window it was born with, forever.
+func TestCircuitSettersReachDetectorBreaker(t *testing.T) {
+	w := New(&fakeQueue{}, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
+	w.EnableAudioDetector(&fakeDetector{})
+	w.SetDetectorOrdering("front")
+	if w.detectorBreaker == nil {
+		t.Fatal("detector breaker not created; cannot exercise the fan-out")
+	}
+
+	// A frozen clock proves the setter reached the breaker: the breaker's
+	// open-until deadline is computed from ITS clock, so if setClock skipped it
+	// the deadline would be built from the real wall clock instead.
+	frozen := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	w.setClock(func() time.Time { return frozen })
+	w.SetCircuitOpenDuration(90 * time.Minute)
+	w.SetCircuitBackoff(90*time.Minute, 90*time.Minute)
+
+	w.detectorBreaker.Trip()
+	got := w.detectorBreaker.OpenUntil()
+	want := frozen.Add(90 * time.Minute)
+	if !got.Equal(want) {
+		t.Errorf("detector breaker OpenUntil = %v; want %v (a circuit setter did not reach it)", got, want)
 	}
 }
