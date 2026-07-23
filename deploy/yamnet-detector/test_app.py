@@ -4,7 +4,8 @@ Stubs the YAMNet model so the test needs no model download. TestClient is used
 WITHOUT a `with` block so the lifespan (which would load the real model) never
 runs, and the stubbed _state is what the handler reads.
 
-Run locally (not in CI; the Go suite is the gate):
+Runs in CI inside the built image (.github/workflows/yamnet.yml, #498) and
+locally:
     pip install -r requirements.txt pytest
     pytest test_app.py -q
 """
