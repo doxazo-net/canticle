@@ -29,11 +29,48 @@ with `tf.saved_model.load` -- `tensorflow-hub` is deliberately not a dependency
 
 - `GET /health` returns `{"status": "ok", "classes": <N>}`.
 
-## Build & deploy
+## Deployment contract: pull the published image
+
+**A deployment consumes this sidecar by pulling the published image, not by
+building from a hand-copied directory.** CI builds `deploy/yamnet-detector/` and
+publishes it to GHCR on every merge to `main` that changes the sidecar, and on
+each release tag (see `.github/workflows/yamnet.yml`, issue #498):
+
+```
+ghcr.io/sydlexius/canticle-yamnet:<tag>
+```
+
+Tags mirror the app image: `nightly` / `dev` (and a dated `nightly-YYYYMMDD`) on
+`main`, plus the semver tags (`X.Y.Z`, `X.Y`) on a release. The image is
+**amd64-only** -- the `linux/amd64` TensorFlow wheel requires AVX, so there is no
+arm64 build and the sidecar cannot run on Apple Silicon (even under emulation the
+TF import aborts). Pull a version tag that matches your Canticle version so their
+`detector_version` provenance lines up (the recorded `detector_version` is the
+Canticle app version -- see the Dockerfile).
+
+Point compose at the published image:
+
+```yaml
+services:
+  yamnet:
+    image: ghcr.io/sydlexius/canticle-yamnet:1.26.0 # match your Canticle version
+```
+
+> **Unsupported: a hand-copied `build.context`.** Do not deploy by copying these
+> files onto a host and pointing `build.context` at that directory. Nothing syncs
+> such a copy to git, nothing validates it, and a merged fix (including a security
+> fix) can sit unshipped while a rebuild faithfully reproduces the stale image and
+> reports success -- the exact failure that motivated #498 (discovered shipping
+> the CVE-2026-59890 fix in #491). Pull the published tag instead.
+
+## Build locally (development only)
 
 ```bash
-docker build -t canticle-yamnet:local .
+docker build -t canticle-yamnet:local deploy/yamnet-detector
 ```
+
+This is for local iteration on the sidecar itself; deployments pull the published
+image above. (Requires an amd64 builder -- see the AVX note.)
 
 ### Resource limits (cap this container)
 
@@ -73,4 +110,7 @@ pip install pytest
 pytest test_app.py -q
 ```
 
-This is a maintainer smoke test; the Go test suite is the CI gate.
+CI also runs this shape test and a live `/health` smoke check on every change to
+`deploy/yamnet-detector/**` (see `.github/workflows/yamnet.yml`), so a change that
+breaks the sidecar's build or its `/classify` contract fails CI rather than only
+surfacing as "instrumental detection stopped working" in production.

@@ -1,0 +1,182 @@
+name: YAMNet Sidecar
+
+# Builds and publishes the YAMNet instrumental-detection sidecar image
+# (deploy/yamnet-detector/) to GHCR so deployments pull a versioned artifact
+# instead of building from a hand-copied local directory (#498).
+#
+# The image is amd64-only: the linux/amd64 TensorFlow wheel requires AVX, so
+# there is no arm64 leg (unlike the app image). This is also why a published
+# image matters -- contributors on Apple Silicon cannot build the sidecar at all.
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect Sidecar Changes
+    runs-on: ubuntu-latest
+    # On a tag the output short-circuits to 'true' and the paths-filter step is
+    # skipped entirely -- a release must publish the version-tagged sidecar
+    # regardless of what the tag commit touched, and paths-filter on a fresh tag
+    # ref (no reliable "before" SHA) is exactly the run we must not depend on.
+    # So the release publish never rides through paths-filter (finding #498-1).
+    outputs:
+      sidecar: ${{ github.ref_type == 'tag' || steps.filter.outputs.sidecar == 'true' }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        id: filter
+        if: github.ref_type != 'tag'
+        with:
+          filters: |
+            sidecar:
+              - 'deploy/yamnet-detector/**'
+              - '.github/workflows/yamnet.yml'
+
+  build:
+    name: Build & Smoke Test
+    runs-on: ubuntu-latest # amd64: the TF wheel needs AVX (no arm64/self-hosted)
+    needs: [changes]
+    # Build when the sidecar changed, or always on a tag (encoded in the
+    # `changes.sidecar` output above, so the tag path does not touch paths-filter).
+    if: needs.changes.outputs.sidecar == 'true'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      # Build once, load into the local daemon for the smoke test. The publish
+      # step below reuses the same GHA layer cache, so this is not a double build.
+      - name: Build sidecar image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: deploy/yamnet-detector
+          file: deploy/yamnet-detector/Dockerfile
+          push: false
+          load: true
+          tags: canticle-yamnet:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
+
+      # The sidecar's health contract: GET /health -> {"status":"ok","classes":N}
+      # with N = the full YAMNet class map (521). A drifted or broken model bake
+      # changes the class count, so asserting it catches the whole class of
+      # "sidecar starts but is wrong" failures the Go suite cannot see.
+      - name: Smoke test (/health)
+        run: |
+          set -euo pipefail
+          docker run -d --name yamnet-smoke -p 8080:8080 canticle-yamnet:smoke
+          # Poll up to ~60s for the model to load and the server to bind.
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/health >/tmp/health.json 2>/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          echo "health response:"; cat /tmp/health.json; echo
+          status=$(jq -r '.status' /tmp/health.json)
+          classes=$(jq -r '.classes' /tmp/health.json)
+          test "$status" = "ok" || { echo "expected status=ok, got $status" >&2; exit 1; }
+          test "$classes" = "521" || { echo "expected classes=521, got $classes" >&2; exit 1; }
+          echo "smoke test passed: status=$status classes=$classes"
+        # Always dump logs on failure so a broken start is diagnosable in CI.
+      - name: Sidecar logs on failure
+        if: failure()
+        run: docker logs yamnet-smoke || true
+
+      - name: Stop sidecar
+        if: always()
+        run: docker rm -f yamnet-smoke || true
+
+      # The /classify shape test (test_app.py) stubs the model, so it needs no
+      # download and runs in seconds -- it belongs in CI (its former "not in CI"
+      # docstring is corrected in this PR). Run it INSIDE the built image so it
+      # validates against the exact hash-pinned requirements.txt the sidecar
+      # ships, rather than a drift-prone hand-assembled dep list on the runner.
+      # `import app` pulls tensorflow/soundfile at module load, so the image's
+      # own environment is the only faithful place to run it. test_app.py is not
+      # COPYed into the image, so it is bind-mounted read-only for this run.
+      - name: Run sidecar shape test (inside the image)
+        run: |
+          set -euo pipefail
+          # --user root: the image drops to appuser (uid 1000), but installing
+          # pytest into system site-packages for this throwaway run needs root.
+          docker run --rm --user root \
+            -v "$PWD/deploy/yamnet-detector/test_app.py:/app/test_app.py:ro" \
+            --entrypoint sh canticle-yamnet:smoke -c \
+            'pip install --no-cache-dir --quiet pytest httpx && pytest test_app.py -q'
+
+  publish:
+    name: Publish to GHCR
+    runs-on: ubuntu-latest
+    needs: [build]
+    # Never publish from a PR or a fork; only push-to-main and release tags.
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ghcr.io/<owner>/<repo>-yamnet, tracking the repository like the app image
+      # (nightly.yml / release.yml use ghcr.io/${{ github.repository }}). On main:
+      # dev + nightly + dated. On a vX.Y.Z tag: the semver tags, mirroring the app.
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}-yamnet
+          # latest=false: a version-pinned sidecar should not have `latest` drift
+          # under it on each release (deployments pin X.Y.Z to match Canticle).
+          flavor: latest=false
+          tags: |
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=nightly,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=nightly-{{date 'YYYYMMDD'}},enable=${{ github.ref == 'refs/heads/main' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build and push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: deploy/yamnet-detector
+          file: deploy/yamnet-detector/Dockerfile
+          push: true
+          platforms: linux/amd64 # AVX-dependent TF wheel; no arm64 leg
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
