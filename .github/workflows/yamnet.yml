@@ -19,6 +19,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read # dorny/paths-filter's documented least-privilege scope for PR change detection
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
