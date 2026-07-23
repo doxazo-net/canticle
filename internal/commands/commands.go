@@ -134,6 +134,7 @@ type ScanCmd struct {
 	DetectInstrumental   bool     `arg:"--detect-instrumental" help:"force instrumental detection on for tracks enqueued by this scan, overriding per-library and global settings; mutually exclusive with --no-detect-instrumental"`
 	NoDetectInstrumental bool     `arg:"--no-detect-instrumental" help:"force instrumental detection off for tracks enqueued by this scan, overriding per-library and global settings; mutually exclusive with --detect-instrumental"`
 	Libraries            []string `arg:"--only,separate" help:"limit scan to named or numeric libraries; repeat to select more than one. Distinct from subcommand --library flags (which target a single library row)"`
+	UnsyncedBefore       string   `arg:"--unsynced-before" help:"with --upgrade/--update, reopen only .txt sidecars (unsynced lyrics and provisional instrumental markers) last modified before this cutoff; for a one-time repair of a historical cohort (issue #617). Accepts a date (2026-04-01, read as midnight UTC) or an RFC3339 instant; the comparison is strict, so a sidecar stamped exactly at the cutoff is excluded"`
 
 	Results                          *ScanResultsCmd                          `arg:"subcommand:results" help:"list persisted scan_results rows"`
 	Clear                            *ScanClearCmd                            `arg:"subcommand:clear" help:"delete persisted scan_results rows for a library"`
@@ -1889,6 +1890,15 @@ func webhookAllowedRoots(ctx context.Context, sqlDB *sql.DB) []string {
 // is forwarded to the nested subcommand when the subcommand did not specify
 // its own --config value.
 func runScanCmd(ctx context.Context, out io.Writer, args ScanCmd) int {
+	// --unsynced-before is parsed on ScanCmd, so it is accepted syntactically on
+	// every `scan` subcommand -- but only the bare scan (runScan) consults it.
+	// Reject it on a subcommand rather than letting it read as applied: a silently
+	// ignored repair-window flag is exactly the failure the --upgrade/--update
+	// guard in resolveUnsyncedBefore exists to prevent.
+	if args.UnsyncedBefore != "" && scanSubcommandSelected(args) {
+		_, _ = fmt.Fprintln(out, "--unsynced-before applies only to `scan` itself, not to a scan subcommand; it narrows which sidecars a re-fetch reopens")
+		return 1
+	}
 	switch {
 	case args.Results != nil:
 		sub := *args.Results
@@ -1978,6 +1988,18 @@ func runScan(ctx context.Context, out io.Writer, args ScanCmd) int {
 		_, _ = fmt.Fprintln(out, err)
 		return 1
 	}
+	unsyncedBefore, err := resolveUnsyncedBefore(args.UnsyncedBefore, args.Upgrade, args.Update)
+	if err != nil {
+		_, _ = fmt.Fprintln(out, err)
+		return 1
+	}
+	if !unsyncedBefore.IsZero() {
+		// The cutoff is keyed on sidecar mtime, which is the only evidence available
+		// for a cohort that predates the database. Echo the resolved instant so the
+		// operator can confirm the window before a long repair run, and so the run's
+		// scope is recoverable from the log afterwards.
+		_, _ = fmt.Fprintf(out, "repair window: re-fetching only unsynced .txt sidecars modified before %s\n", unsyncedBefore.UTC().Format(time.RFC3339))
+	}
 	// A manual scan realigns only when realign.enabled AND realign.on_scan (both
 	// off by default, so no behavior change unless opted in).
 	rlg, rlgBackup := serveRealigner(sqlDB, cfg, true)
@@ -1988,6 +2010,7 @@ func runScan(ctx context.Context, out io.Writer, args ScanCmd) int {
 		BFS:             args.BFS,
 		EmbeddedLyrics:  embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
 		DetectorVersion: detectorScanVersion(cfg),
+		UnsyncedBefore:  unsyncedBefore,
 	}, detectOverride, cfg.InstrumentalDetector.Enabled, nil, rlg, rlgBackup)
 	s.EnrichOverride = enrichOverride
 	s.GlobalEnrichDefault = cfg.Enrichment.Enabled
