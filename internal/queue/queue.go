@@ -695,6 +695,17 @@ func (q *DBQueue) StampUnclassifiedMiss(ctx context.Context, id int64, tel Instr
 	return n > 0, nil
 }
 
+// instrumentalTelemetryGuard is the row predicate shared by
+// StampInstrumentalTelemetry and NeedsInstrumentalTelemetry. It is one constant
+// rather than two hand-copied strings because the dry-run contract depends on
+// the write and its preview selecting the same rows: previewing one set and
+// applying another is the failure that contract exists to prevent, and sharing
+// the predicate makes that divergence unrepresentable instead of merely tested
+// for.
+//
+// Every term is load-bearing; see StampInstrumentalTelemetry for why.
+const instrumentalTelemetryGuard = `instrumental_result = 1 AND status = 'done' AND music_sum IS NULL`
+
 // StampInstrumentalTelemetry records the evidence behind an instrumental verdict
 // the row already carries, without changing the verdict itself (#557).
 //
@@ -732,10 +743,7 @@ func (q *DBQueue) StampInstrumentalTelemetry(ctx context.Context, id int64, tel 
              speech_mean = ?,
              vocal_class = ?,
              detector_version = ?
-         WHERE id = ?
-           AND instrumental_result = 1
-           AND status = 'done'
-           AND music_sum IS NULL`,
+         WHERE id = ? AND `+instrumentalTelemetryGuard,
 		tel.MusicSum, tel.VocalPeak, tel.SpeechMean, tel.VocalClass, tel.DetectorVersion, id,
 	)
 	if err != nil {
@@ -758,11 +766,7 @@ func (q *DBQueue) StampInstrumentalTelemetry(ctx context.Context, id int64, tel 
 func (q *DBQueue) NeedsInstrumentalTelemetry(ctx context.Context, id int64) (bool, error) {
 	var n int
 	if err := q.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM work_queue
-         WHERE id = ?
-           AND instrumental_result = 1
-           AND status = 'done'
-           AND music_sum IS NULL`,
+		`SELECT COUNT(*) FROM work_queue WHERE id = ? AND `+instrumentalTelemetryGuard,
 		id,
 	).Scan(&n); err != nil {
 		return false, fmt.Errorf("queue: needs instrumental telemetry for id %d: %w", id, err)

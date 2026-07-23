@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"testing"
@@ -129,23 +130,29 @@ func TestNeedsInstrumentalTelemetryMirrorsTheStamp(t *testing.T) {
 	ctx := context.Background()
 	tel := InstrumentalTelemetry{MusicSum: 0.91, VocalPeak: 0.02, SpeechMean: 0.003, DetectorVersion: "1.26.0"}
 
+	// Bound as parameters rather than interpolated into the statement: the values
+	// are literals here, but the fmt.Sprintf form matches the SAST injection
+	// signature and would recur as gate noise on every run.
 	cases := []struct {
-		name  string
-		setup string // applied to the seeded row
-		want  bool
+		name               string
+		instrumentalResult sql.NullInt64
+		status             string
+		musicSum           sql.NullFloat64
+		want               bool
 	}{
-		{"unscored done instrumental", `instrumental_result = 1, status = 'done'`, true},
-		{"already scored", `instrumental_result = 1, status = 'done', music_sum = 0.5`, false},
-		{"still processing", `instrumental_result = 1, status = 'processing'`, false},
-		{"not instrumental", `instrumental_result = 0, status = 'done'`, false},
-		{"no verdict", `instrumental_result = NULL, status = 'done'`, false},
+		{"unscored done instrumental", sql.NullInt64{Int64: 1, Valid: true}, "done", sql.NullFloat64{}, true},
+		{"already scored", sql.NullInt64{Int64: 1, Valid: true}, "done", sql.NullFloat64{Float64: 0.5, Valid: true}, false},
+		{"still processing", sql.NullInt64{Int64: 1, Valid: true}, "processing", sql.NullFloat64{}, false},
+		{"not instrumental", sql.NullInt64{Int64: 0, Valid: true}, "done", sql.NullFloat64{}, false},
+		{"no verdict", sql.NullInt64{}, "done", sql.NullFloat64{}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			q := NewDBQueue(openQueueTestDB(t))
 			id := seedDeferredRow(t, q, "Artist", "Title", "/music/a.flac")
 			if _, err := q.db.ExecContext(ctx,
-				fmt.Sprintf(`UPDATE work_queue SET %s WHERE id = ?`, tc.setup), id); err != nil {
+				`UPDATE work_queue SET instrumental_result = ?, status = ?, music_sum = ? WHERE id = ?`,
+				tc.instrumentalResult, tc.status, tc.musicSum, id); err != nil {
 				t.Fatalf("seed: %v", err)
 			}
 
