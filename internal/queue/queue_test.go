@@ -3401,6 +3401,86 @@ func TestDBQueue_SetInstrumentalResultNullTelemetryWhenNotRun(t *testing.T) {
 	}
 }
 
+// TestDequeueCarriesTelemetry verifies that a dequeued WorkItem carries the
+// stored instrumental_result + detector telemetry when a prior detection stamped
+// it, and leaves those fields nil when no detection ran. This is the read path
+// the worker uses to re-decide a deferred row from cached scores without
+// re-inference (#582).
+func TestDequeueCarriesTelemetry(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.SetRandomized(false)
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	q.now = func() time.Time { return now }
+
+	// Row A: stamp not-instrumental telemetry, defer it, then re-dequeue.
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Vocalist", TrackName: "Ballad"}}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue A: %v", err)
+	}
+	itemA, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue A: %v", err)
+	}
+	tel := InstrumentalTelemetry{MusicSum: 0.42, VocalPeak: 0.71, SpeechMean: 0.06, VocalClass: "Singing", DetectorVersion: "v9.9.9"}
+	if err := q.SetInstrumentalResult(ctx, itemA.ID, 0, tel); err != nil {
+		t.Fatalf("SetInstrumentalResult A: %v", err)
+	}
+	if _, err := q.Defer(ctx, itemA.ID, time.Hour, nil); err != nil {
+		t.Fatalf("Defer A: %v", err)
+	}
+	// Advance past the deferral so the row is dequeueable again.
+	now = now.Add(2 * time.Hour)
+
+	// Row B: never detected; its telemetry fields must dequeue nil.
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "Composer", TrackName: "Opus"}}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue B: %v", err)
+	}
+
+	// Re-dequeue A (deferred, now eligible) and dequeue B (pending). Deferred
+	// priority (-100) sorts below pending, so B comes first.
+	first, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue first: %v", err)
+	}
+	second, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue second: %v", err)
+	}
+	got := map[int64]WorkItem{first.ID: first, second.ID: second}
+
+	reA := got[itemA.ID]
+	if reA.InstrumentalResult == nil || *reA.InstrumentalResult != 0 {
+		t.Fatalf("A InstrumentalResult = %v; want *0", reA.InstrumentalResult)
+	}
+	if reA.DetectorMusicSum == nil || *reA.DetectorMusicSum != tel.MusicSum {
+		t.Errorf("A DetectorMusicSum = %v; want *%v", reA.DetectorMusicSum, tel.MusicSum)
+	}
+	if reA.DetectorVocalPeak == nil || *reA.DetectorVocalPeak != tel.VocalPeak {
+		t.Errorf("A DetectorVocalPeak = %v; want *%v", reA.DetectorVocalPeak, tel.VocalPeak)
+	}
+	if reA.DetectorSpeechMean == nil || *reA.DetectorSpeechMean != tel.SpeechMean {
+		t.Errorf("A DetectorSpeechMean = %v; want *%v", reA.DetectorSpeechMean, tel.SpeechMean)
+	}
+	if reA.DetectorVocalClass == nil || *reA.DetectorVocalClass != tel.VocalClass {
+		t.Errorf("A DetectorVocalClass = %v; want *%q", reA.DetectorVocalClass, tel.VocalClass)
+	}
+	if reA.DetectorVersion == nil || *reA.DetectorVersion != tel.DetectorVersion {
+		t.Errorf("A DetectorVersion = %v; want *%q", reA.DetectorVersion, tel.DetectorVersion)
+	}
+
+	// Row B is whichever dequeued item is not A.
+	var reB WorkItem
+	for id, it := range got {
+		if id != itemA.ID {
+			reB = it
+		}
+	}
+	if reB.InstrumentalResult != nil || reB.DetectorMusicSum != nil || reB.DetectorVocalPeak != nil ||
+		reB.DetectorSpeechMean != nil || reB.DetectorVocalClass != nil || reB.DetectorVersion != nil {
+		t.Errorf("B telemetry = %+v; want all nil (no detection ran)", reB)
+	}
+}
+
 // TestDBQueue_SetProviderLane verifies SetProviderLane persists the winning lane
 // on a work_queue row and that empty lane is a no-op.
 func TestDBQueue_SetProviderLane(t *testing.T) {

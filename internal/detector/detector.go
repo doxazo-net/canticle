@@ -132,6 +132,15 @@ type Result struct {
 	// construction time, sourced from the app version (internal/version). Empty
 	// when the detector was constructed without a version (e.g. in tests).
 	Version string
+	// Reusable reports whether this decision was made from a FULL classifier
+	// response (max map present AND the vocal baseline complete), so its scores are
+	// a faithful decision input that may be re-decided from storage later. It is
+	// false for a degraded response (legacy mean-only sidecar, or a partial max
+	// map) where the live path forces not-instrumental via the completeness guards:
+	// such scores (e.g. vocal_peak=0 for want of a max map, not want of vocals)
+	// would wrongly re-decide instrumental if the guards were dropped, so the memo
+	// path must not persist them as reusable telemetry (#582).
+	Reusable bool
 	// Classes is the per-class MEAN probability map from the classified sample,
 	// retained for debugging and observability.
 	Classes map[string]float64

@@ -172,6 +172,13 @@ type Worker struct {
 	// from it are non-fatal (the miss path continues normally). Set via
 	// EnableAudioDetector.
 	audioDetector detector.Detector
+	// detectorMemo is the typed handle on the memoizing wrapper installed around
+	// audioDetector by EnableAudioDetector (audioDetector points at the same
+	// object). It is how RunOnce primes each item's stored scores before dispatch
+	// and reads back whether the last detection ran live inference. nil when no
+	// detector is configured. Single-goroutine worker contract makes the memo's
+	// per-item prime/last state safe (one item processed at a time). (#582)
+	detectorMemo *memoDetector
 	// detectInstrumentalDefault is the global config default for instrumental
 	// detection, used to resolve work items whose per-item decision is nil (NULL in
 	// the DB, e.g. pre-existing rows). Set via SetInstrumentalDetectionDefault.
@@ -632,7 +639,18 @@ func (w *Worker) EnableVerification(verifier verification.Verifier, belowConfide
 // The confidence threshold is owned by the detector itself (see NewHTTPDetector),
 // so the worker keeps no copy of it.
 func (w *Worker) EnableAudioDetector(d detector.Detector) {
-	w.audioDetector = d
+	if d == nil {
+		w.audioDetector = nil
+		w.detectorMemo = nil
+		_ = w.rebuildOrchestrator()
+		return
+	}
+	// Wrap in the memoizing decorator so the detector lane reuses stored scores
+	// instead of re-running YAMNet on every deferred pass (#582). audioDetector
+	// and detectorMemo point at the SAME object: the lane sees it through the
+	// detector.Detector interface, RunOnce drives it through the typed handle.
+	w.detectorMemo = newMemoDetector(d)
+	w.audioDetector = w.detectorMemo
 	// Rebuild so a detector configured after New (the common case: the config
 	// layer wires it in after construction) inserts the detector lane. The mode
 	// is unchanged (and already valid) and the primary lane is always present,
@@ -1029,6 +1047,11 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// miss, so a disabled item cleanly skips the detector. Provider lanes never
 	// consult sourcePath, so this substitution has no effect on them.
 	detectorPath := w.detectorPathFor(item)
+	// Prime the memoizing detector with this row's stored scores so the detector
+	// lane can re-decide from them instead of re-running YAMNet, when the stored
+	// detector_version still matches the current model version. Cleared (nil) for
+	// a row with no prior detection so it runs live inference. (#582)
+	w.primeDetectorMemo(item)
 	song, cacheHit, err := w.song(ctx, resolvedTrack, detectorPath, bypassCache)
 	if err == nil {
 		w.lastItemContactedProvider = contactedProvider(song)
@@ -1128,6 +1151,15 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			// nothing further to detect; this branch owns only the miss-counter and
 			// defer/requeue duties.
 			w.recordLaneAttempts(context.WithoutCancel(ctx), item.ID, song.LaneAttempts)
+			// Persist the not-instrumental detector telemetry on the FIRST live
+			// detection so later deferred passes can re-decide from the stored scores
+			// instead of re-running YAMNet (#582). Only when the detector actually ran
+			// inference this pass (a reuse pass already has the scores stored) and
+			// returned a not-instrumental verdict carrying a model version. Stamped
+			// while the row is still 'processing' (SetInstrumentalResult is not status-
+			// guarded), mirroring the positive path's stamp-before-complete. Non-fatal:
+			// a failed stamp only costs a re-inference next pass, never correctness.
+			w.stampDetectorMissTelemetry(context.WithoutCancel(ctx), item.ID)
 			if derr := w.requeueDeferred(ctx, item, err); derr != nil {
 				return derr
 			}
@@ -1353,6 +1385,67 @@ func (w *Worker) refreshRecordingIdentity(item queue.WorkItem, track models.Trac
 		track.AlbumName = meta.AlbumName
 	}
 	return track
+}
+
+// primeDetectorMemo hands the memoizing detector this row's stored scores so the
+// detector lane can re-decide from them without re-running inference, when the
+// stored detector_version still matches the current model version. A row missing
+// either instrumental_result or detector_version has no reusable prior detection,
+// so the memo is primed nil and runs live inference. No-op when no detector is
+// configured. (#582)
+func (w *Worker) primeDetectorMemo(item queue.WorkItem) {
+	if w.detectorMemo == nil {
+		return
+	}
+	if item.InstrumentalResult == nil || item.DetectorVersion == nil {
+		w.detectorMemo.prime(nil)
+		return
+	}
+	tel := &storedTelemetry{Version: *item.DetectorVersion}
+	if item.DetectorMusicSum != nil {
+		tel.MusicSum = *item.DetectorMusicSum
+	}
+	if item.DetectorVocalPeak != nil {
+		tel.VocalPeak = *item.DetectorVocalPeak
+	}
+	if item.DetectorSpeechMean != nil {
+		tel.SpeechMean = *item.DetectorSpeechMean
+	}
+	if item.DetectorVocalClass != nil {
+		tel.VocalClass = *item.DetectorVocalClass
+	}
+	w.detectorMemo.prime(tel)
+}
+
+// stampDetectorMissTelemetry persists a not-instrumental detector verdict on the
+// current row so later deferred passes re-decide from the stored scores instead
+// of re-running YAMNet (#582). It writes only when the detector ran LIVE inference
+// this pass (a reuse pass already has the telemetry stored) and returned a not-
+// instrumental result carrying a model version. Non-fatal: a failed stamp only
+// costs a re-inference next pass. No-op when no detector is configured.
+func (w *Worker) stampDetectorMissTelemetry(ctxNoCancel context.Context, id int64) {
+	if w.detectorMemo == nil {
+		return
+	}
+	res, ran := w.detectorMemo.lastInference()
+	// Skip a stamp unless the detector ran live inference this pass, returned a
+	// not-instrumental verdict carrying a model version, AND the response was a
+	// full one (Reusable): a degraded response's scores would wrongly re-decide
+	// instrumental on a later reuse pass, so they must not be stored as reusable
+	// telemetry (#582).
+	if !ran || res.Instrumental || res.Version == "" || !res.Reusable {
+		return
+	}
+	tel := queue.InstrumentalTelemetry{
+		MusicSum:        res.Confidence,
+		VocalPeak:       res.VocalConfidence,
+		SpeechMean:      res.SpeechConfidence,
+		VocalClass:      res.WinningVocalClass,
+		DetectorVersion: res.Version,
+	}
+	if err := w.queue.SetInstrumentalResult(ctxNoCancel, id, 0, tel); err != nil {
+		slog.Warn("worker: stamp not-instrumental telemetry failed; will re-infer next pass", "id", id, "error", err)
+	}
 }
 
 // stampDetectorInstrumental records a detector-sourced instrumental settle from

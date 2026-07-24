@@ -3271,3 +3271,275 @@ func TestAllLanesUnavailableIgnoresDetectorUnderParallelMode(t *testing.T) {
 		t.Fatal("under parallel mode the gate must ignore the detector and idle on open provider breakers")
 	}
 }
+
+// buildRedequeuedItem returns the work item as it would re-dequeue after a
+// not-instrumental stamp: carrying the stored telemetry that primeDetectorMemo
+// reads. It mirrors what scanWorkItem now populates on a deferred row (#582).
+func buildRedequeuedItem(base queue.WorkItem, st instrumentalStamp) queue.WorkItem {
+	res := st.Result
+	base.InstrumentalResult = &res
+	base.DetectorMusicSum = &st.Tel.MusicSum
+	base.DetectorVocalPeak = &st.Tel.VocalPeak
+	base.DetectorSpeechMean = &st.Tel.SpeechMean
+	base.DetectorVocalClass = &st.Tel.VocalClass
+	base.DetectorVersion = &st.Tel.DetectorVersion
+	return base
+}
+
+// TestRunOnceDetectorMemoScoresDeferredRowOnce verifies that a not-instrumental
+// deferred row is scored by YAMNet exactly once: pass 1 runs live inference and
+// stamps instrumental_result=0 + telemetry; pass 2 re-decides from the stored
+// scores with no second inference (#582).
+func TestRunOnceDetectorMemoScoresDeferredRowOnce(t *testing.T) {
+	base := queue.WorkItem{
+		ID: 300,
+		Inputs: models.Inputs{
+			Track:      models.Track{ArtistName: "Vocalist", TrackName: "Ballad"},
+			Outdir:     "out",
+			Filename:   "ballad.lrc",
+			SourcePath: "/music/ballad.flac",
+		},
+	}
+	q := &fakeQueue{items: []queue.WorkItem{base}}
+	c := &fakeCache{}
+	fetcher := &fakeFetcher{err: musixmatch.ErrNoLyrics}
+	writer := &fakeWriter{}
+	// A not-instrumental live result carrying a model version and scores.
+	inner := &fakeStoredDecider{
+		version:   "v1",
+		detectRes: detector.Result{Instrumental: false, Version: "v1", Confidence: 0.40, VocalConfidence: 0.72, SpeechConfidence: 0.05, WinningVocalClass: "Singing", Reusable: true},
+	}
+
+	w := New(q, c, fetcher, writer)
+	w.EnableAudioDetector(inner)
+	w.SetInstrumentalDetectionDefault(true)
+
+	// Pass 1: live inference, stamp result=0.
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce pass 1: %v", err)
+	}
+	if inner.detectN != 1 {
+		t.Fatalf("after pass 1: detectN = %d; want 1 (first live inference)", inner.detectN)
+	}
+	if len(q.deferred) != 1 || q.deferred[0] != 300 {
+		t.Fatalf("after pass 1: deferred = %v; want [300]", q.deferred)
+	}
+	if len(q.instrumentalStamps) != 1 {
+		t.Fatalf("after pass 1: instrumentalStamps = %d; want 1 (not-instrumental telemetry stamped)", len(q.instrumentalStamps))
+	}
+	st := q.instrumentalStamps[0]
+	if st.Result != 0 || st.Tel.DetectorVersion != "v1" || st.Tel.MusicSum != 0.40 || st.Tel.VocalPeak != 0.72 {
+		t.Fatalf("after pass 1: stamp = %+v; want result 0 + v1 telemetry", st)
+	}
+
+	// Pass 2: re-enqueue the row carrying the stamped telemetry; must NOT re-infer.
+	q.items = append(q.items, buildRedequeuedItem(base, st))
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce pass 2: %v", err)
+	}
+	if inner.detectN != 1 {
+		t.Fatalf("after pass 2: detectN = %d; want 1 (stored scores reused, no re-inference)", inner.detectN)
+	}
+	if len(q.deferred) != 2 {
+		t.Fatalf("after pass 2: deferred = %v; want two deferrals", q.deferred)
+	}
+}
+
+// TestRunOnceDetectorMemoReinfersOnModelVersionBump verifies that a detector
+// model-version change forces re-inference even when stored scores exist (#582).
+func TestRunOnceDetectorMemoReinfersOnModelVersionBump(t *testing.T) {
+	base := queue.WorkItem{
+		ID: 301,
+		Inputs: models.Inputs{
+			Track:      models.Track{ArtistName: "Vocalist", TrackName: "Anthem"},
+			Outdir:     "out",
+			Filename:   "anthem.lrc",
+			SourcePath: "/music/anthem.flac",
+		},
+	}
+	q := &fakeQueue{items: []queue.WorkItem{base}}
+	c := &fakeCache{}
+	fetcher := &fakeFetcher{err: musixmatch.ErrNoLyrics}
+	writer := &fakeWriter{}
+	inner := &fakeStoredDecider{
+		version:   "v1",
+		detectRes: detector.Result{Instrumental: false, Version: "v1", Confidence: 0.30, VocalConfidence: 0.80, SpeechConfidence: 0.04, WinningVocalClass: "Singing", Reusable: true},
+	}
+
+	w := New(q, c, fetcher, writer)
+	w.EnableAudioDetector(inner)
+	w.SetInstrumentalDetectionDefault(true)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce pass 1: %v", err)
+	}
+	st := q.instrumentalStamps[0]
+
+	// Bump the model version; the stored scores were computed under v1.
+	inner.version = "v2"
+	inner.detectRes.Version = "v2"
+
+	q.items = append(q.items, buildRedequeuedItem(base, st))
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce pass 2: %v", err)
+	}
+	if inner.detectN != 2 {
+		t.Fatalf("detectN = %d; want 2 (model version changed -> re-inference)", inner.detectN)
+	}
+}
+
+// TestRunOnceDetectorMemoRecalibrationReDecidesFromStoredScores verifies that a
+// threshold recalibration (same model version) re-decides a stored not-
+// instrumental row as instrumental from the cached scores, with NO re-inference,
+// settling it done (#582).
+func TestRunOnceDetectorMemoRecalibrationReDecidesFromStoredScores(t *testing.T) {
+	base := queue.WorkItem{
+		ID: 302,
+		Inputs: models.Inputs{
+			Track:      models.Track{ArtistName: "Composer", TrackName: "Etude"},
+			Outdir:     "out",
+			Filename:   "etude.lrc",
+			SourcePath: "/music/etude.flac",
+		},
+	}
+	q := &fakeQueue{items: []queue.WorkItem{base}}
+	c := &fakeCache{}
+	fetcher := &fakeFetcher{err: musixmatch.ErrNoLyrics}
+	writer := &fakeWriter{}
+	inner := &fakeStoredDecider{
+		version:   "v1",
+		detectRes: detector.Result{Instrumental: false, Version: "v1", Confidence: 0.88, VocalConfidence: 0.03, SpeechConfidence: 0.02, WinningVocalClass: "Singing", Reusable: true},
+	}
+
+	w := New(q, c, fetcher, writer)
+	w.EnableAudioDetector(inner)
+	w.SetInstrumentalDetectionDefault(true)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce pass 1: %v", err)
+	}
+	st := q.instrumentalStamps[0]
+	if st.Result != 0 {
+		t.Fatalf("pass 1 stamp result = %d; want 0", st.Result)
+	}
+
+	// Recalibration: the SAME stored scores now clear the (lowered) threshold.
+	inner.decideFn = func(_, _, _ float64) bool { return true }
+
+	q.items = append(q.items, buildRedequeuedItem(base, st))
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce pass 2: %v", err)
+	}
+	if inner.detectN != 1 {
+		t.Fatalf("detectN = %d; want 1 (re-decided from stored scores, no re-inference)", inner.detectN)
+	}
+	if len(q.completed) != 1 || q.completed[0] != 302 {
+		t.Fatalf("completed = %v; want [302] (recalibration settled it instrumental)", q.completed)
+	}
+	// The settle stamps result=1 (the second stamp after pass 1's result=0).
+	last := q.instrumentalStamps[len(q.instrumentalStamps)-1]
+	if last.Result != 1 || last.Tel.DetectorVersion != "v1" {
+		t.Fatalf("final stamp = %+v; want result 1 + v1 telemetry", last)
+	}
+}
+
+// TestRunOnceDetectorMemoNoStampLeakToSkippedItem verifies that a detected not-
+// instrumental item followed by a detection-DISABLED item does not leak the first
+// item's scores onto the second: the disabled item never runs Detect, so it must
+// receive no instrumental stamp at all (#582 hostile-review C1).
+func TestRunOnceDetectorMemoNoStampLeakToSkippedItem(t *testing.T) {
+	itemA := queue.WorkItem{
+		ID: 310,
+		Inputs: models.Inputs{
+			Track:      models.Track{ArtistName: "Vocalist", TrackName: "Ballad"},
+			Outdir:     "out",
+			Filename:   "ballad.lrc",
+			SourcePath: "/music/ballad.flac",
+		},
+		DetectInstrumental: boolPtr(true),
+	}
+	itemB := queue.WorkItem{
+		ID: 311,
+		Inputs: models.Inputs{
+			Track:      models.Track{ArtistName: "Singer", TrackName: "Anthem"},
+			Outdir:     "out",
+			Filename:   "anthem.lrc",
+			SourcePath: "/music/anthem.flac",
+		},
+		DetectInstrumental: boolPtr(false), // detection OFF for B
+	}
+	q := &fakeQueue{items: []queue.WorkItem{itemA, itemB}}
+	c := &fakeCache{}
+	fetcher := &fakeFetcher{err: musixmatch.ErrNoLyrics}
+	writer := &fakeWriter{}
+	inner := &fakeStoredDecider{
+		version:   "v1",
+		detectRes: detector.Result{Instrumental: false, Version: "v1", Confidence: 0.40, VocalConfidence: 0.72, SpeechConfidence: 0.05, WinningVocalClass: "Singing", Reusable: true},
+	}
+
+	w := New(q, c, fetcher, writer)
+	w.EnableAudioDetector(inner)
+	w.SetInstrumentalDetectionDefault(true)
+
+	// Pass 1: item A, detection on -> live inference, stamps result=0.
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce A: %v", err)
+	}
+	// Pass 2: item B, detection off -> Detect never runs.
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce B: %v", err)
+	}
+
+	if inner.detectN != 1 {
+		t.Fatalf("detectN = %d; want 1 (only A ran detection)", inner.detectN)
+	}
+	// Exactly one stamp, and it must be A's (id 310), never B's.
+	for _, st := range q.instrumentalStamps {
+		if st.ID == 311 {
+			t.Fatalf("item B (311) got an instrumental stamp %+v; want none (detection was disabled, scores would be A's)", st)
+		}
+	}
+	if len(q.instrumentalStamps) != 1 || q.instrumentalStamps[0].ID != 310 {
+		t.Fatalf("instrumentalStamps = %+v; want exactly one stamp for id 310", q.instrumentalStamps)
+	}
+}
+
+// TestRunOnceDetectorMemoDegradedResponseNotStamped verifies that a not-
+// instrumental verdict from a DEGRADED detector response (Reusable=false, e.g. a
+// legacy mean-only sidecar) is not stamped as reusable telemetry: its scores are
+// not a faithful decision input, so a later pass must re-infer rather than
+// re-decide from them (#582 hostile-review I1).
+func TestRunOnceDetectorMemoDegradedResponseNotStamped(t *testing.T) {
+	item := queue.WorkItem{
+		ID: 320,
+		Inputs: models.Inputs{
+			Track:      models.Track{ArtistName: "Legacy", TrackName: "Track"},
+			Outdir:     "out",
+			Filename:   "track.lrc",
+			SourcePath: "/music/track.flac",
+		},
+	}
+	q := &fakeQueue{items: []queue.WorkItem{item}}
+	c := &fakeCache{}
+	fetcher := &fakeFetcher{err: musixmatch.ErrNoLyrics}
+	writer := &fakeWriter{}
+	// Degraded: not-instrumental, has a version, but Reusable=false.
+	inner := &fakeStoredDecider{
+		version:   "v1",
+		detectRes: detector.Result{Instrumental: false, Version: "v1", Confidence: 0.99, VocalConfidence: 0.0, Reusable: false},
+	}
+
+	w := New(q, c, fetcher, writer)
+	w.EnableAudioDetector(inner)
+	w.SetInstrumentalDetectionDefault(true)
+
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(q.instrumentalStamps) != 0 {
+		t.Fatalf("instrumentalStamps = %+v; want none (degraded response must not be stored as reusable)", q.instrumentalStamps)
+	}
+	if len(q.deferred) != 1 {
+		t.Fatalf("deferred = %v; want the item deferred as a normal miss", q.deferred)
+	}
+}
