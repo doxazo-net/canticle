@@ -1043,6 +1043,27 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 				return fmt.Errorf("worker: release item %d after lanes unavailable: %w", item.ID, releaseErr)
 			}
 			return errLanesUnavailable
+		case orchestrator.OutcomeLaneNotReady:
+			// The detector sidecar is still booting (dial-refused, never reached
+			// this process). Release the item back to pending with no miss
+			// increment and no cooldown so the next work cycle re-attempts it once
+			// the sidecar is up. Deferring here would charge the track a miss
+			// (toward retirement) plus a multi-day cooldown for a pure boot race,
+			// and misreport an infrastructural race as a lyric outage (#567).
+			//
+			// Unlike OutcomeUnavailable (every lane's breaker open, so NO lane was
+			// consulted -> the whole drain pass idles), the providers WERE consulted
+			// here and returned a clean answer; only the detector could not run. So
+			// return nil to keep draining the rest of the queue rather than
+			// errLanesUnavailable, which wraps errIdle and would halt the pass on a
+			// single booting-detector item.
+			if releaseErr := w.queue.Release(context.WithoutCancel(ctx), item.ID); releaseErr != nil {
+				return fmt.Errorf("worker: release item %d after detector not ready: %w", item.ID, releaseErr)
+			}
+			// The providers gave a clean round-trip (a benign miss under the
+			// not-ready detector), so we are not in a failure backoff.
+			w.consecutiveFailures = 0
+			return nil
 		case orchestrator.OutcomeAuthRateLimit:
 			// A throttle / auth / renewal signal. The lane already tripped its
 			// breaker and emitted the honest classification log; the worker only

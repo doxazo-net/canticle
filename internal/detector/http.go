@@ -559,7 +559,10 @@ func (d *HTTPDetector) classify(ctx context.Context, samplePath string) (_ class
 
 	res, err := d.httpClient.Do(req)
 	if err != nil {
-		return classifyResponse{}, fmt.Errorf("%w: %w", ErrClassifierUnavailable, err)
+		// A transport-level failure (connection refused / no route): the sidecar
+		// is not reachable at all. Distinct from a reachable-but-non-2xx response
+		// below, so a boot-time race is not treated as a genuine outage (#567).
+		return classifyResponse{}, fmt.Errorf("%w: %w", ErrClassifierNotReady, err)
 	}
 	defer func() {
 		if closeErr := res.Body.Close(); closeErr != nil && retErr == nil {

@@ -103,6 +103,16 @@ func detectorClassifier(l *Lane, err error) error {
 			slog.Info("lane circuit closed; recovered", "lane", l.Name())
 		}
 		return err
+	case errors.Is(err, ErrLaneNotReady):
+		// Startup race: the sidecar is still booting. Do NOT trip the breaker, so
+		// the next work cycle re-attempts the lane once the sidecar is up. The
+		// worker releases the item penalty-free (no miss, no cooldown) (#567).
+		// (The default branch below would also leave the breaker closed, but this
+		// explicit case gives a distinct log and pins the intent against future
+		// edits to that branch.)
+		slog.Debug("detector lane not ready (sidecar starting up); leaving circuit closed",
+			"lane", l.Name(), "cause", err)
+		return err
 	case errors.Is(err, ErrLaneOutage):
 		res := l.breaker.Trip()
 		slog.Warn("lane circuit opened: detector outage; degrading to providers",

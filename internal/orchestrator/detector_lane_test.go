@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -155,6 +156,136 @@ func TestDetectorLane_NilPacerIsSafe(t *testing.T) {
 
 	if _, err := lane.FindLyrics(context.Background(), models.Track{TrackName: "x"}, "/music/x.flac"); err != nil {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// scriptedDetector returns a scripted sequence of (result, error) pairs, one
+// per Detect call, so a test can drive a success-then-failure or repeated
+// failure sequence through the lane's ever-reached gate (#567).
+type scriptedDetector struct {
+	steps []scriptStep
+	i     int
+}
+
+type scriptStep struct {
+	res detector.Result
+	err error
+}
+
+func (s *scriptedDetector) Detect(_ context.Context, _ string) (detector.Result, error) {
+	step := s.steps[s.i]
+	if s.i < len(s.steps)-1 {
+		s.i++
+	}
+	return step.res, step.err
+}
+
+// notReadyErr mimics the detector's dial-failure wrap: the classifier could not
+// be reached at all.
+func notReadyErr() error {
+	return fmt.Errorf("detector classify: %w: dial tcp: connect: connection refused", detector.ErrClassifierNotReady)
+}
+
+// TestDetectorLane_FirstDialErrorIsNotReady: before the lane has ever reached
+// the sidecar, a dial failure is a startup race (ErrLaneNotReady), not an
+// outage, and does not trip the breaker.
+func TestDetectorLane_FirstDialErrorIsNotReady(t *testing.T) {
+	d := &scriptedDetector{steps: []scriptStep{{err: notReadyErr()}}}
+	br := circuit.New(time.Minute, time.Hour)
+	lane := NewDetectorLane(d, br, nil)
+
+	_, err := lane.FindLyrics(context.Background(), models.Track{}, "/music/x.flac")
+	if !errors.Is(err, ErrLaneNotReady) {
+		t.Fatalf("first dial error: got %v, want ErrLaneNotReady", err)
+	}
+	if errors.Is(err, ErrLaneOutage) {
+		t.Fatalf("a boot-race must not be an outage: %v", err)
+	}
+	if br.Trips() != 0 {
+		t.Fatalf("not-ready must not trip the breaker, got %d trips", br.Trips())
+	}
+}
+
+// TestDetectorLane_DialErrorAfterSuccessIsOutage: once the lane has reached the
+// sidecar, a later dial failure means the sidecar was up and then died - a
+// genuine outage.
+func TestDetectorLane_DialErrorAfterSuccessIsOutage(t *testing.T) {
+	d := &scriptedDetector{steps: []scriptStep{
+		{res: detector.Result{Instrumental: false, Version: "1.5.0"}}, // reaches sidecar
+		{err: notReadyErr()}, // now it died
+	}}
+	lane := NewDetectorLane(d, circuit.New(time.Minute, time.Hour), nil)
+
+	_, _ = lane.FindLyrics(context.Background(), models.Track{}, "/music/x.flac")    // success
+	_, err := lane.FindLyrics(context.Background(), models.Track{}, "/music/x.flac") // died
+	if !errors.Is(err, ErrLaneOutage) {
+		t.Fatalf("dial error after a success: got %v, want ErrLaneOutage", err)
+	}
+	if errors.Is(err, ErrLaneNotReady) {
+		t.Fatalf("a post-success failure must not be not-ready: %v", err)
+	}
+}
+
+// TestDetectorLane_DeadFromBootEscalatesAfterBound: a sidecar never reachable
+// since boot is not a boot race - after notReadyBound not-ready results the lane
+// escalates to a genuine outage so the breaker trips and the lane stops
+// re-spending a provider call every cycle.
+func TestDetectorLane_DeadFromBootEscalatesAfterBound(t *testing.T) {
+	steps := make([]scriptStep, notReadyBound+1)
+	for i := range steps {
+		steps[i] = scriptStep{err: notReadyErr()}
+	}
+	d := &scriptedDetector{steps: steps}
+	lane := NewDetectorLane(d, circuit.New(time.Minute, time.Hour), nil)
+
+	for i := range notReadyBound {
+		_, err := lane.FindLyrics(context.Background(), models.Track{}, "/music/x.flac")
+		if !errors.Is(err, ErrLaneNotReady) {
+			t.Fatalf("call %d: got %v, want ErrLaneNotReady", i+1, err)
+		}
+	}
+	_, err := lane.FindLyrics(context.Background(), models.Track{}, "/music/x.flac")
+	if !errors.Is(err, ErrLaneOutage) {
+		t.Fatalf("after %d not-readies: got %v, want ErrLaneOutage", notReadyBound, err)
+	}
+}
+
+// TestDetectorClassifier_NotReadyDoesNotTrip: a not-ready (startup race) error
+// must leave the breaker CLOSED, so the next work cycle re-attempts the lane
+// once the sidecar is up, and must stay matchable as ErrLaneNotReady so the
+// worker classifies it as OutcomeLaneNotReady (#567).
+func TestDetectorClassifier_NotReadyDoesNotTrip(t *testing.T) {
+	br := circuit.New(time.Minute, time.Hour)
+	lane := NewDetectorLane(&stubDetector{}, br, nil)
+	notReady := fmt.Errorf("detector not ready: %w", errors.Join(ErrLaneNotReady, errors.New("connection refused")))
+
+	got := detectorClassifier(lane, notReady)
+
+	if br.Trips() != 0 {
+		t.Fatalf("not-ready must not trip the breaker, got %d trips", br.Trips())
+	}
+	if br.Allow() != circuit.StateClosed {
+		t.Fatalf("breaker must stay closed on not-ready, got %v", br.Allow())
+	}
+	if !errors.Is(got, ErrLaneNotReady) {
+		t.Fatalf("returned error must stay matchable as ErrLaneNotReady: %v", got)
+	}
+	if ClassifyOutcome(got) != OutcomeLaneNotReady {
+		t.Fatalf("classifier output must classify as OutcomeLaneNotReady, got %v", ClassifyOutcome(got))
+	}
+}
+
+// TestDetectorClassifier_OutageStillTrips guards that the not-ready carve-out
+// did not weaken the genuine-outage path.
+func TestDetectorClassifier_OutageStillTrips(t *testing.T) {
+	br := circuit.New(time.Minute, time.Hour)
+	lane := NewDetectorLane(&stubDetector{}, br, nil)
+	outage := fmt.Errorf("detector request failed: %w", errors.Join(ErrLaneOutage, errors.New("connection refused")))
+
+	_ = detectorClassifier(lane, outage)
+
+	if br.Trips() == 0 {
+		t.Fatal("a genuine outage must still trip the breaker")
 	}
 }
 

@@ -182,6 +182,65 @@ func TestNewHTTPDetectorClampsSampleDuration(t *testing.T) {
 	}
 }
 
+// TestHTTPDetectorDialErrorIsNotReady verifies that a transport-level failure
+// (the classifier endpoint cannot be dialed at all) surfaces as
+// ErrClassifierNotReady, distinct from ErrClassifierUnavailable, so a
+// still-booting sidecar is not treated as a genuine outage (#567).
+func TestHTTPDetectorDialErrorIsNotReady(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "song.flac")
+	if err := os.WriteFile(audioPath, []byte("fake audio"), 0600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	ffmpegPath := fakeFFmpeg(t)
+
+	// Create then immediately close a server so its URL refuses connections.
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+
+	d, err := NewHTTPDetector(Config{ClassifierURL: url, SampleDurationSeconds: 30, MinConfidence: 0.90, InstrumentalClasses: []string{"Music"}, VocalClasses: []string{"Singing"}, VocalMaxConfidence: 0.05, FFmpegPath: ffmpegPath})
+	if err != nil {
+		t.Fatalf("NewHTTPDetector: %v", err)
+	}
+
+	_, derr := d.Detect(context.Background(), audioPath)
+	if !errors.Is(derr, ErrClassifierNotReady) {
+		t.Fatalf("dial error: got %v; want ErrClassifierNotReady", derr)
+	}
+	if errors.Is(derr, ErrClassifierUnavailable) {
+		t.Fatalf("dial error must NOT also match ErrClassifierUnavailable: %v", derr)
+	}
+}
+
+// TestHTTPDetectorNon2xxIsUnavailableNotNotReady guards the split: a reachable
+// endpoint returning a non-2xx status stays ErrClassifierUnavailable and must
+// NOT be misclassified as the not-ready (dial-failure) case (#567).
+func TestHTTPDetectorNon2xxIsUnavailableNotNotReady(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "song.flac")
+	if err := os.WriteFile(audioPath, []byte("fake audio"), 0600); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	ffmpegPath := fakeFFmpeg(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	d, err := NewHTTPDetector(Config{ClassifierURL: srv.URL, SampleDurationSeconds: 30, MinConfidence: 0.90, InstrumentalClasses: []string{"Music"}, VocalClasses: []string{"Singing"}, VocalMaxConfidence: 0.05, FFmpegPath: ffmpegPath})
+	if err != nil {
+		t.Fatalf("NewHTTPDetector: %v", err)
+	}
+
+	_, derr := d.Detect(context.Background(), audioPath)
+	if !errors.Is(derr, ErrClassifierUnavailable) {
+		t.Fatalf("500 response: got %v; want ErrClassifierUnavailable", derr)
+	}
+	if errors.Is(derr, ErrClassifierNotReady) {
+		t.Fatalf("500 response must NOT match ErrClassifierNotReady: %v", derr)
+	}
+}
+
 func TestNewHTTPDetectorErrorsWhenFFmpegMissing(t *testing.T) {
 	_, err := NewHTTPDetector(Config{ClassifierURL: "http://classifier:8080", SampleDurationSeconds: 30, MinConfidence: 0.90, FFmpegPath: filepath.Join(t.TempDir(), "missing-ffmpeg")})
 	if err == nil {
