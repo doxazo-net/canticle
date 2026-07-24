@@ -85,6 +85,40 @@ type Change struct {
 	MarkerPaths []string
 }
 
+// Outcome statuses reported to Options.Outcome after a change's mutation
+// resolves. The intent record (Options.Report) is written BEFORE the mutation
+// for crash safety, so it alone cannot say whether the change actually landed; a
+// restore tool must consult the matching Outcome record and replay only the ones
+// confirmed applied (#515).
+const (
+	// OutcomeApplied: the mutation committed (row settled/reset, or a peer had
+	// already settled it with the same verdict). Safe to trust; a restore reverts
+	// exactly these.
+	OutcomeApplied = "applied"
+	// OutcomeSkipped: a serve-mode worker claimed the row (or it was gone) between
+	// the listing and the mutation, so nothing was written. Not restorable -- there
+	// is nothing to revert.
+	OutcomeSkipped = "skipped"
+	// OutcomeFailed: the change did not complete (a Report/reset/marker error, or
+	// an ambiguous settle whose commit outcome is unknown -- see Outcome.Ambiguous).
+	OutcomeFailed = "failed"
+)
+
+// Outcome is the realized result of one change, handed to Options.Outcome after
+// the mutation resolves so the backup trail records what actually happened rather
+// than only intent (#515). Keyed by QueueID to the earlier Report record.
+type Outcome struct {
+	QueueID int64
+	// Status is OutcomeApplied, OutcomeSkipped, or OutcomeFailed.
+	Status string
+	// Ambiguous marks the one case where OutcomeFailed does NOT mean "no change":
+	// SettleInstrumental returned an error that may have come from Commit itself,
+	// so the settle may or may not have landed and the marker was deliberately
+	// left in place. A restore must treat an ambiguous-failed row as
+	// possibly-applied (verify before reverting), never as a clean no-op.
+	Ambiguous bool
+}
+
 // Result counts one Run.
 type Result struct {
 	Total          int // candidate vocal-gate rejections considered
@@ -93,6 +127,13 @@ type Result struct {
 	ResetStale     int // rows reset to never-classified (cross-version pass)
 	SkippedClaimed int // rows a serve-mode worker claimed mid-recalibration
 	Errors         int // non-fatal per-row failures
+
+	// MaxExaminedID is the highest work_queue id this run looked at (0 if no
+	// candidates). Feed it back as the next run's AfterID to resume past the rows
+	// this run already examined -- the forward-direction resume cursor (#516).
+	// Because candidates are listed ORDER BY id, it is the id of the last row in
+	// the returned set.
+	MaxExaminedID int64
 
 	// Reverse-direction counters (Reverse only).
 	Reversed             int // settled instrumentals reverted under a tightened gate
@@ -106,6 +147,13 @@ type Options struct {
 	LibraryID *int64
 	// Limit caps the candidate set when > 0.
 	Limit int
+	// AfterID is a resume cursor (#516): when > 0, only candidate rows whose
+	// work_queue id is strictly greater are considered. Combined with the
+	// MaxExaminedID reported in Result, an operator can page through the backlog
+	// with repeated bounded --limit runs without re-selecting the same low-id
+	// non-passing rows every time. 0 starts from the beginning. Forward
+	// (loosening) direction only; the Reverse path lists a different row set.
+	AfterID int64
 	// DryRun previews without mutating anything.
 	DryRun bool
 	// MinConfidence, VocalMax, SpeechMax are the (presumably loosened)
@@ -121,6 +169,14 @@ type Options struct {
 	// aborts that row's mutation and counts an error; it never aborts the
 	// Run. Nil disables it.
 	Report func(Change) error
+	// Outcome is invoked once per change AFTER its mutation resolves, carrying the
+	// realized result (applied/skipped/failed) so the backup trail records what
+	// actually happened, not just the earlier Report intent (#515). Fires for
+	// every row that reached the mutation stage, including a Report failure (so a
+	// restore can see the intent never applied). Never fires in a dry run. An
+	// Outcome error is best-effort logged and does not abort the Run. Nil disables
+	// it.
+	Outcome func(Outcome) error
 	// Preview is invoked once per change in a dry run instead of mutating.
 	// Nil disables it.
 	Preview func(Change)
@@ -146,11 +202,18 @@ func (r *Recalibrator) Run(ctx context.Context, opts Options) (Result, error) {
 	rows, err := r.store.ListVocalGateRejections(ctx, queue.ListVocalGateRejectionsOptions{
 		LibraryID: opts.LibraryID,
 		Limit:     opts.Limit,
+		AfterID:   opts.AfterID,
 	})
 	if err != nil {
 		return res, fmt.Errorf("instrumentalrecalib: list vocal-gate rejections: %w", err)
 	}
 	res.Total = len(rows)
+	// The list is ORDER BY id, so the last row carries the highest id examined --
+	// the cursor to resume past on the next run (#516). Set before the loop so an
+	// early ctx cancellation still reports how far the selection reached.
+	if len(rows) > 0 {
+		res.MaxExaminedID = rows[len(rows)-1].ID
+	}
 
 	for _, row := range rows {
 		if err := ctx.Err(); err != nil {
@@ -192,6 +255,9 @@ func (r *Recalibrator) Run(ctx context.Context, opts Options) (Result, error) {
 		if opts.Report != nil {
 			if err := opts.Report(change); err != nil {
 				res.Errors++
+				// The intent record failed to persist, so the mutation is not
+				// attempted; record the failure so a restore knows nothing applied.
+				r.reportOutcome(opts, Outcome{QueueID: row.ID, Status: OutcomeFailed})
 				continue
 			}
 		}
@@ -200,15 +266,18 @@ func (r *Recalibrator) Run(ctx context.Context, opts Options) (Result, error) {
 			reset, err := r.store.ResetInstrumentalToUnclassified(ctx, row.ID)
 			if err != nil {
 				res.Errors++
+				r.reportOutcome(opts, Outcome{QueueID: row.ID, Status: OutcomeFailed})
 				continue
 			}
 			if !reset {
 				// A worker claimed the row (it is no longer 'deferred') between the
 				// list and here: nothing to reset.
 				res.SkippedClaimed++
+				r.reportOutcome(opts, Outcome{QueueID: row.ID, Status: OutcomeSkipped})
 				continue
 			}
 			res.ResetStale++
+			r.reportOutcome(opts, Outcome{QueueID: row.ID, Status: OutcomeApplied})
 			continue
 		}
 
@@ -218,6 +287,7 @@ func (r *Recalibrator) Run(ctx context.Context, opts Options) (Result, error) {
 			res.Errors++
 			// Never settle a verdict whose marker did not fully land.
 			res.MarkersWritten -= r.rollback(written, &res)
+			r.reportOutcome(opts, Outcome{QueueID: row.ID, Status: OutcomeFailed})
 			continue
 		}
 
@@ -230,23 +300,39 @@ func (r *Recalibrator) Run(ctx context.Context, opts Options) (Result, error) {
 			res.Errors++
 			slog.Warn("instrumentalrecalib: settle failed after the marker was written; leaving the marker in place because the commit outcome is unknown",
 				"id", row.ID, "markers", written, "error", err)
+			r.reportOutcome(opts, Outcome{QueueID: row.ID, Status: OutcomeFailed, Ambiguous: true})
 			continue
 		}
 
 		switch outcome {
 		case queue.Settled:
 			res.Settled++
+			r.reportOutcome(opts, Outcome{QueueID: row.ID, Status: OutcomeApplied})
 		case queue.SettleAlreadyInstrumental:
 			// A PEER settled this row first with the same verdict; the marker on
-			// disk is correct (byte-identical). Do not remove it.
+			// disk is correct (byte-identical) and is left in place.
+			//
+			// This reports OutcomeApplied because the end STATE is what the run
+			// intended (row done+instrumental, marker on disk). But the DB verdict
+			// was established by a DIFFERENT actor -- classifyNoSettle keys only on
+			// status='done' AND instrumental_result=1, not on which run wrote it. A
+			// future restore that reverts every OutcomeApplied row will therefore
+			// also revert a verdict this run did not create. That is acceptable as a
+			// STATE reversal (the row really is instrumental regardless of author),
+			// but if the restore tool ever needs actor attribution, this arm is
+			// where a distinct status (e.g. applied-by-peer) belongs. No restore
+			// tool exists yet, so nothing reverts today (#515).
+			r.reportOutcome(opts, Outcome{QueueID: row.ID, Status: OutcomeApplied})
 		case queue.SettleClaimed, queue.SettleRowGone:
 			// A worker owns the row, or it is gone. Nothing was written to the DB,
 			// so our marker is an orphan: take it back.
 			res.MarkersWritten -= r.rollback(written, &res)
 			res.SkippedClaimed++
+			r.reportOutcome(opts, Outcome{QueueID: row.ID, Status: OutcomeSkipped})
 		case queue.SettleFailed:
 			// Unreachable: a failure returns a non-nil error, handled above.
 			res.Errors++
+			r.reportOutcome(opts, Outcome{QueueID: row.ID, Status: OutcomeFailed})
 		}
 	}
 
@@ -290,6 +376,20 @@ func (r *Recalibrator) rollback(written []string, res *Result) int {
 		}
 	}
 	return len(written)
+}
+
+// reportOutcome hands a realized Outcome to Options.Outcome when set. An error
+// from the callback is best-effort logged and swallowed: the mutation has already
+// happened, so failing to append its outcome record must not abort the Run or
+// change the row's fate -- it only degrades the backup trail's completeness (#515).
+func (r *Recalibrator) reportOutcome(opts Options, o Outcome) {
+	if opts.Outcome == nil {
+		return
+	}
+	if err := opts.Outcome(o); err != nil {
+		slog.Warn("instrumentalrecalib: could not record change outcome to the backup trail",
+			"id", o.QueueID, "status", o.Status, "error", err)
+	}
 }
 
 // outputPath derives the marker's output directory and base filename from

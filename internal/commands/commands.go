@@ -250,6 +250,7 @@ type ScanReconcileInstrumentalRecalibrateCmd struct {
 	Library    string `arg:"--library" help:"limit to a single library (name or numeric id); default covers every library"`
 	Yes        bool   `arg:"--yes" help:"actually write markers and settle/reset rows (without it, prints what would change)"`
 	Limit      int    `arg:"--limit" help:"maximum number of candidate rows to process (0 = unlimited)" default:"0"`
+	AfterID    int64  `arg:"--after-id" help:"resume cursor: only consider rows whose work_queue id is greater (forward direction only). Pass the 'resume with --after-id=N' value printed by a prior --limit run to advance past already-examined rows" default:"0"`
 	Backup     string `arg:"--backup" help:"path for the JSONL backup of changed rows (default: <db-dir>/reconcile-instrumental-recalibrate-backup-<ts>.jsonl)" default:""`
 	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 	// Reverse selects the TIGHTENING direction: re-decide rows already settled

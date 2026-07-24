@@ -2,7 +2,6 @@ package commands
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,6 +17,10 @@ import (
 // written and fsynced before the row is mutated so an applied change always has
 // its restorable record.
 type reconcileInstrumentalBackup struct {
+	// Type discriminates the intent record (this shape) from the outcome record
+	// (reconcileInstrumentalOutcome) in the same JSONL. Absent on records written
+	// before #515; a reader must treat a missing Type as "intent".
+	Type       string `json:"type,omitempty"`
 	QueueID    int64  `json:"queue_id"`
 	Artist     string `json:"artist"`
 	Title      string `json:"title"`
@@ -36,8 +39,21 @@ type reconcileInstrumentalBackup struct {
 	At           time.Time `json:"at"`
 }
 
+// reconcileInstrumentalOutcome is the second JSONL record for a row: the realized
+// result appended AFTER the mutation resolves, so a restore replays only rows
+// whose outcome is "applied" (#515). Mirrors the recalibrate sibling's outcome
+// record so both share the backup-trail contract.
+type reconcileInstrumentalOutcome struct {
+	Type      string    `json:"type"` // always "outcome"
+	QueueID   int64     `json:"queue_id"`
+	Outcome   string    `json:"outcome"`             // applied | skipped | failed
+	Ambiguous bool      `json:"ambiguous,omitempty"` // failed-but-maybe-applied settle
+	At        time.Time `json:"at"`
+}
+
 func appendReconcileInstrumentalBackup(f *os.File, ch instrumentalbackfill.Change) error {
 	rec := reconcileInstrumentalBackup{
+		Type:         "intent",
 		QueueID:      ch.QueueID,
 		Artist:       ch.Artist,
 		Title:        ch.Title,
@@ -51,18 +67,22 @@ func appendReconcileInstrumentalBackup(f *os.File, ch instrumentalbackfill.Chang
 		Detector:     ch.Telemetry.DetectorVersion,
 		At:           time.Now().UTC(),
 	}
-	b, err := json.Marshal(rec)
-	if err != nil {
-		return fmt.Errorf("marshal backup record: %w", err)
-	}
-	if _, err := f.Write(append(b, '\n')); err != nil {
-		return fmt.Errorf("write backup record: %w", err)
-	}
-	// fsync before the row is mutated (the identityrepair backup-first rule).
-	if err := f.Sync(); err != nil {
-		return fmt.Errorf("sync backup record: %w", err)
-	}
-	return nil
+	// appendJSONLSynced is shared with the recalibrate sibling (defined in
+	// reconcile_instrumental_recalibrate.go): both records get identical
+	// marshal+append+fsync durability (the identityrepair backup-first rule).
+	return appendJSONLSynced(f, rec)
+}
+
+// appendReconcileInstrumentalOutcome appends the realized-outcome record for a
+// row, fsynced like the intent record so the trail is crash-durable (#515).
+func appendReconcileInstrumentalOutcome(f *os.File, o instrumentalbackfill.Outcome) error {
+	return appendJSONLSynced(f, reconcileInstrumentalOutcome{
+		Type:      "outcome",
+		QueueID:   o.QueueID,
+		Outcome:   o.Status,
+		Ambiguous: o.Ambiguous,
+		At:        time.Now().UTC(),
+	})
 }
 
 // runReconcileInstrumental is CLI wiring over internal/instrumentalbackfill: it
@@ -108,6 +128,14 @@ func runReconcileInstrumental(ctx context.Context, out io.Writer, args ScanRecon
 				backup = f
 			}
 			return appendReconcileInstrumentalBackup(backup, ch)
+		},
+		Outcome: func(o instrumentalbackfill.Outcome) error {
+			// A nil handle means Report failed to open the backup; the engine
+			// already reports that row as failed, so there is nothing to append to.
+			if backup == nil {
+				return nil
+			}
+			return appendReconcileInstrumentalOutcome(backup, o)
 		},
 	})
 	if err != nil {

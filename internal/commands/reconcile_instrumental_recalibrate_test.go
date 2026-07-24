@@ -3,8 +3,10 @@ package commands
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -347,5 +349,114 @@ func TestRunReconcileInstrumentalRecalibrate_BackupOpenFailure(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "errors=1") {
 		t.Errorf("want the backup-open failure counted as an error; got: %s", buf.String())
+	}
+}
+
+// TestRunReconcileInstrumentalRecalibrate_BackupRecordsOutcome verifies the JSONL
+// backup carries BOTH an intent record (before the mutation) and an outcome
+// record (applied, after), so a restore can tell a committed change from a
+// no-op (#515).
+func TestRunReconcileInstrumentalRecalibrate_BackupRecordsOutcome(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	outdir := filepath.Join(dir, "music")
+	if err := os.MkdirAll(outdir, 0o755); err != nil {
+		t.Fatalf("mkdir music: %v", err)
+	}
+	cfgPath := filepath.Join(dir, "config.toml")
+	writeRecalibrateCfg(t, cfgPath, dbPath)
+	id := seedVocalGateRejection(t, ctx, dbPath, outdir, version)
+	backupPath := filepath.Join(dir, "backup.jsonl")
+
+	var buf bytes.Buffer
+	if code := runReconcileInstrumentalRecalibrate(ctx, &buf, ScanReconcileInstrumentalRecalibrateCmd{
+		ConfigPath: cfgPath, Yes: true, Backup: backupPath,
+	}); code != 0 {
+		t.Fatalf("exit=%d\n%s", code, buf.String())
+	}
+
+	data, err := os.ReadFile(backupPath) //nolint:gosec // G304: test-controlled path
+	if err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	var sawIntent, sawOutcome bool
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var rec struct {
+			Type    string `json:"type"`
+			QueueID int64  `json:"queue_id"`
+			Outcome string `json:"outcome"`
+		}
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("unmarshal %q: %v", line, err)
+		}
+		if rec.QueueID != id {
+			t.Fatalf("record for id=%d; want %d", rec.QueueID, id)
+		}
+		switch rec.Type {
+		case "intent":
+			sawIntent = true
+		case "outcome":
+			sawOutcome = true
+			if rec.Outcome != "applied" {
+				t.Errorf("outcome=%q; want applied", rec.Outcome)
+			}
+		default:
+			t.Fatalf("unexpected record type %q", rec.Type)
+		}
+	}
+	if !sawIntent || !sawOutcome {
+		t.Fatalf("backup missing records: intent=%v outcome=%v\n%s", sawIntent, sawOutcome, data)
+	}
+}
+
+// TestRunReconcileInstrumentalRecalibrate_AfterIDRejectedWithReverse verifies the
+// forward-only --after-id cursor is refused (exit 1) when combined with
+// --reverse, rather than silently ignored (#516).
+func TestRunReconcileInstrumentalRecalibrate_AfterIDRejectedWithReverse(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	cfgPath := filepath.Join(dir, "config.toml")
+	writeRecalibrateCfg(t, cfgPath, dbPath)
+
+	var buf bytes.Buffer
+	code := runReconcileInstrumentalRecalibrate(ctx, &buf, ScanReconcileInstrumentalRecalibrateCmd{
+		ConfigPath: cfgPath, Reverse: true, AfterID: 5,
+	})
+	if code != 1 {
+		t.Fatalf("exit=%d; want 1 for --after-id with --reverse\n%s", code, buf.String())
+	}
+	if !strings.Contains(buf.String(), "not supported with --reverse") {
+		t.Errorf("want a clear rejection message; got:\n%s", buf.String())
+	}
+}
+
+// TestRunReconcileInstrumentalRecalibrate_ResumeCursorPrinted verifies that a
+// forward --limit run that fills its cap prints the resume cursor so the operator
+// can page past the rows just examined (#516).
+func TestRunReconcileInstrumentalRecalibrate_ResumeCursorPrinted(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	outdir := filepath.Join(dir, "music")
+	if err := os.MkdirAll(outdir, 0o755); err != nil {
+		t.Fatalf("mkdir music: %v", err)
+	}
+	cfgPath := filepath.Join(dir, "config.toml")
+	writeRecalibrateCfg(t, cfgPath, dbPath)
+	id := seedVocalGateRejection(t, ctx, dbPath, outdir, version)
+
+	// --limit 1 with one candidate: Total == limit, so the run may have left more
+	// behind and must print the resume cursor pointing at the examined id.
+	var buf bytes.Buffer
+	if code := runReconcileInstrumentalRecalibrate(ctx, &buf, ScanReconcileInstrumentalRecalibrateCmd{
+		ConfigPath: cfgPath, Yes: true, Limit: 1,
+	}); code != 0 {
+		t.Fatalf("exit=%d\n%s", code, buf.String())
+	}
+	want := "resume with --after-id=" + strconv.FormatInt(id, 10)
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("want %q in output; got:\n%s", want, buf.String())
 	}
 }
