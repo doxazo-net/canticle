@@ -319,7 +319,33 @@ func (d *HTTPDetector) Detect(ctx context.Context, audioPath string) (Result, er
 		WinningVocalClass: winningVocalClass,
 		Version:           d.version,
 		Classes:           resp.Mean,
+		// Reusable only when the response was complete: a degraded response
+		// (no/partial max map) forces not-instrumental above via the guards, and
+		// its scores must not be persisted as reusable telemetry (see Result.Reusable
+		// and #582 hostile-review I1).
+		Reusable: maxAvailable && baselineComplete,
 	}, nil
+}
+
+// ModelVersion returns the detector's configured version string (Config.Version,
+// sourced from the app version at construction). It keys score-cache validity:
+// stored telemetry is reusable only while its recorded detector_version matches
+// this. Empty when the detector was constructed without a version.
+func (d *HTTPDetector) ModelVersion() string {
+	return d.version
+}
+
+// DecideStored re-applies the detector's CURRENT three-gate thresholds to already
+// -computed scores, with no sidecar call. It shares the exact predicate the live
+// path uses (Instrumental), so a stored-score re-decision can never disagree with
+// a fresh inference at the same thresholds. The sidecar-completeness guards
+// (maxAvailable/baselineComplete) are deliberately omitted: they qualify a LIVE
+// classifier response, and stored scores were already accepted when first
+// computed. This lets a threshold recalibration re-decide deferred rows from
+// cached scores (issue #582), mirroring the calibration-sweep contract documented
+// on Instrumental.
+func (d *HTTPDetector) DecideStored(musicSum, vocalPeak, speechMean float64) bool {
+	return Instrumental(musicSum, vocalPeak, speechMean, d.minConfidence, d.vocalMaxConfidence, d.speechMaxConfidence)
 }
 
 // warnUnknownClassesOnce logs, at most once per detector, any configured

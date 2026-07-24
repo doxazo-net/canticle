@@ -61,6 +61,11 @@ func TestHTTPDetectorAboveThresholdIsInstrumental(t *testing.T) {
 	if res.Confidence < 0.90 {
 		t.Fatalf("Confidence = %.3f; want >= 0.90", res.Confidence)
 	}
+	// A healthy response (max map present, baseline complete) is a faithful
+	// decision that may be re-decided from stored scores later (#582).
+	if !res.Reusable {
+		t.Fatalf("Reusable = false; want true for a healthy full response")
+	}
 }
 
 func TestHTTPDetectorBelowThresholdIsMiss(t *testing.T) {
@@ -769,6 +774,13 @@ func TestDetectMissingMaxMapIsNotInstrumental(t *testing.T) {
 	if res.Instrumental {
 		t.Fatal("missing max map must degrade to NOT instrumental (safe)")
 	}
+	// A degraded response (no max map) must NOT be marked reusable: its scores are
+	// not a faithful decision input (vocal_peak is 0 for want of a max map, not for
+	// want of vocals), so re-deciding from them later could wrongly flip to
+	// instrumental (#582 hostile-review I1).
+	if res.Reusable {
+		t.Fatal("a no-max-map degraded response must have Reusable=false")
+	}
 }
 
 // A non-empty max map that DROPS a baseline vocal class (a class present in the
@@ -1339,5 +1351,40 @@ func TestDetectLogLineIncludesVocalClassAndVersion(t *testing.T) {
 	}
 	if !strings.Contains(logged, "detector_version=v9.9.9") {
 		t.Errorf("log line missing detector_version=v9.9.9; got: %s", logged)
+	}
+}
+
+func TestHTTPDetectorModelVersion(t *testing.T) {
+	ffmpegPath := fakeFFmpeg(t)
+	d, err := NewHTTPDetector(Config{ClassifierURL: "http://127.0.0.1:1/classify", FFmpegPath: ffmpegPath, Version: "v1.2.3"})
+	if err != nil {
+		t.Fatalf("NewHTTPDetector: %v", err)
+	}
+	if got := d.ModelVersion(); got != "v1.2.3" {
+		t.Fatalf("ModelVersion = %q; want v1.2.3", got)
+	}
+}
+
+func TestHTTPDetectorDecideStored(t *testing.T) {
+	ffmpegPath := fakeFFmpeg(t)
+	// Scores: music clears 0.90, vocal peak 0.03, speech mean 0.01.
+	const musicSum, vocalPeak, speechMean = 0.95, 0.03, 0.01
+
+	// vocalMax 0.05 > 0.03 vocal peak -> gate passes -> instrumental.
+	lenient, err := NewHTTPDetector(Config{ClassifierURL: "http://127.0.0.1:1/classify", FFmpegPath: ffmpegPath, MinConfidence: 0.90, VocalMaxConfidence: 0.05})
+	if err != nil {
+		t.Fatalf("NewHTTPDetector lenient: %v", err)
+	}
+	if !lenient.DecideStored(musicSum, vocalPeak, speechMean) {
+		t.Fatalf("DecideStored(lenient) = false; want true (vocal peak %.3f < 0.05)", vocalPeak)
+	}
+
+	// vocalMax 0.01 < 0.03 vocal peak -> gate fails -> not instrumental, same scores.
+	strict, err := NewHTTPDetector(Config{ClassifierURL: "http://127.0.0.1:1/classify", FFmpegPath: ffmpegPath, MinConfidence: 0.90, VocalMaxConfidence: 0.01})
+	if err != nil {
+		t.Fatalf("NewHTTPDetector strict: %v", err)
+	}
+	if strict.DecideStored(musicSum, vocalPeak, speechMean) {
+		t.Fatalf("DecideStored(strict) = true; want false (vocal peak %.3f >= 0.01)", vocalPeak)
 	}
 }

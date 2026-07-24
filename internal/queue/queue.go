@@ -112,6 +112,19 @@ type WorkItem struct {
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 	CompletedAt        *time.Time
+	// InstrumentalResult and the five Detector* fields carry the stored audio-
+	// detection outcome + telemetry (SetInstrumentalResult / StampUnclassifiedMiss)
+	// onto the dequeued item so the worker can re-decide a deferred row from cached
+	// scores without re-running YAMNet inference (#582). All are pointers: nil means
+	// the column is NULL (detection never ran for this row), distinct from a real
+	// 0 result or 0.0 score. detector_version keys cache validity - a stored score
+	// is reusable only while it matches the current detector model version.
+	InstrumentalResult *int
+	DetectorMusicSum   *float64
+	DetectorVocalPeak  *float64
+	DetectorSpeechMean *float64
+	DetectorVocalClass *string
+	DetectorVersion    *string
 }
 
 // DBQueue is a SQLite-backed queue for durable lyrics work.
@@ -276,7 +289,7 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
                  ELSE NULL
              END
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version`,
 		inputs.Track.ArtistName,
 		inputs.Track.TrackName,
 		inputs.Track.AlbumName,
@@ -344,7 +357,7 @@ const dequeueRandomizedSQL = `UPDATE work_queue
              LIMIT 1
          )
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version`
 
 // dequeueDeterministicSQL claims the next ready item in stable FIFO order within
 // a priority tier (created_at, then id).
@@ -360,7 +373,7 @@ const dequeueDeterministicSQL = `UPDATE work_queue
              LIMIT 1
          )
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version`
 
 // dequeueBatchedClaimSQL claims the eligible buffered row with the lowest
 // batch_seq and clears its batch_seq in the same atomic statement, so a claimed
@@ -385,7 +398,7 @@ const dequeueBatchedClaimSQL = `UPDATE work_queue
              LIMIT 1
          )
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version`
 
 // refillBufferSQL stamps batch_seq = offset + 1 .. offset + N on the next N
 // eligible unbuffered rows, randomizing composition and intra-tier order while
@@ -879,7 +892,7 @@ func (q *DBQueue) Fail(ctx context.Context, id int64, cause error) (WorkItem, er
          WHERE id = ?
            AND status = 'processing'
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version`,
 		nextAttempts,
 		nextAttemptAt,
 		lastError,
@@ -946,7 +959,7 @@ func (q *DBQueue) Defer(ctx context.Context, id int64, retryAfter time.Duration,
          WHERE id = ?
            AND status = 'processing'
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version`,
 		nextAttemptAt,
 		lastError,
 		id,
@@ -998,7 +1011,7 @@ func (q *DBQueue) RetireMiss(ctx context.Context, id int64) (WorkItem, error) {
          WHERE id = ?
            AND status = 'processing'
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version`,
 		now,
 		missLimitReachedError,
 		id,
@@ -1240,7 +1253,7 @@ type ListFilter struct {
 // optionally filtered by status and capped by limit.
 func (q *DBQueue) List(ctx context.Context, filter ListFilter) (items []WorkItem, retErr error) {
 	const baseQuery = `SELECT id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id
+                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version
                        FROM work_queue`
 	const orderClause = ` ORDER BY priority DESC, created_at ASC, id ASC`
 	const limitClause = ` LIMIT ?`
@@ -1305,7 +1318,7 @@ func (q *DBQueue) Retry(ctx context.Context, id int64) (WorkItem, error) {
          WHERE id = ?
            AND status = 'failed'
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id`,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version`,
 		now,
 		id,
 	)
@@ -1891,7 +1904,7 @@ func detectEligibleClause(globalDefault bool) (clause string, args []any) {
 // detector). Read-only.
 func (q *DBQueue) ListUnclassified(ctx context.Context, opts ListUnclassifiedOptions) (items []WorkItem, retErr error) {
 	const baseQuery = `SELECT id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id
+                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version
                        FROM work_queue
                        WHERE instrumental_result IS NULL
                          AND status = 'deferred'
@@ -1971,7 +1984,7 @@ func (q *DBQueue) ListInstrumental(ctx context.Context, opts ListInstrumentalOpt
 	// instrumental_result = 1 just before Complete, so a still-'processing' row could
 	// otherwise be picked up and cleared mid-write.
 	const baseQuery = `SELECT id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id
+                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version
                        FROM work_queue WHERE instrumental_result = 1 AND status = 'done'`
 	const orderClause = ` ORDER BY priority DESC, created_at ASC, id ASC`
 	query := baseQuery
@@ -2539,6 +2552,14 @@ func scanWorkItem(row rowScanner) (WorkItem, error) {
 	var completedAt sql.NullString
 	var scanResultID sql.NullInt64
 	var detectInstrumental sql.NullBool
+	var (
+		instrumentalResult sql.NullInt64
+		musicSum           sql.NullFloat64
+		vocalPeak          sql.NullFloat64
+		speechMean         sql.NullFloat64
+		vocalClass         sql.NullString
+		detectorVersion    sql.NullString
+	)
 	err := row.Scan(
 		&item.ID,
 		&item.Inputs.Track.ArtistName,
@@ -2561,6 +2582,12 @@ func scanWorkItem(row rowScanner) (WorkItem, error) {
 		&completedAt,
 		&outputPaths,
 		&scanResultID,
+		&instrumentalResult,
+		&musicSum,
+		&vocalPeak,
+		&speechMean,
+		&vocalClass,
+		&detectorVersion,
 	)
 	if err != nil {
 		return WorkItem{}, err
@@ -2571,6 +2598,34 @@ func scanWorkItem(row rowScanner) (WorkItem, error) {
 	if detectInstrumental.Valid {
 		b := detectInstrumental.Bool
 		item.DetectInstrumental = &b
+	}
+	// Carry the stored detector telemetry only when present. Each column is
+	// independently nullable, but SetInstrumentalResult / StampUnclassifiedMiss
+	// always write instrumental_result together with the five score columns, so
+	// in practice they are all present or all NULL (#582).
+	if instrumentalResult.Valid {
+		v := int(instrumentalResult.Int64)
+		item.InstrumentalResult = &v
+	}
+	if musicSum.Valid {
+		v := musicSum.Float64
+		item.DetectorMusicSum = &v
+	}
+	if vocalPeak.Valid {
+		v := vocalPeak.Float64
+		item.DetectorVocalPeak = &v
+	}
+	if speechMean.Valid {
+		v := speechMean.Float64
+		item.DetectorSpeechMean = &v
+	}
+	if vocalClass.Valid {
+		v := vocalClass.String
+		item.DetectorVocalClass = &v
+	}
+	if detectorVersion.Valid {
+		v := detectorVersion.String
+		item.DetectorVersion = &v
 	}
 	item.NextAttemptAt, err = parseTime(nextAttemptAt)
 	if err != nil {
