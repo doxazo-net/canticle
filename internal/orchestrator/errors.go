@@ -25,6 +25,14 @@ var ErrLaneBenignMiss = errors.New("orchestrator: lane benign miss (no result)")
 // and it degrades to OutcomeUnavailable.
 var ErrLaneOutage = errors.New("orchestrator: lane outage")
 
+// ErrLaneNotReady is the sentinel a non-provider lane returns when its backend
+// could not be dialed at all AND the lane has never reached that backend since
+// this process booted -- a startup race, not a genuine outage. The worker
+// RELEASES the item back to pending with no miss increment and no cooldown, and
+// the breaker is NOT tripped, so the next work cycle re-attempts the lane once
+// the sidecar has finished booting (issue #567).
+var ErrLaneNotReady = errors.New("orchestrator: lane not ready (starting up)")
+
 // OutcomeClass classifies a lane's outcome for cross-lane precedence (design
 // doc Gap 4). The precedence rule is "least-certain-negative wins": any signal
 // that we did not truly learn the track is absent (auth, rate-limit, transport,
@@ -55,6 +63,13 @@ const (
 	// would otherwise become the surfaced error and let the worker downgrade a
 	// genuine provider failure to a benign miss, suppressing its backoff.
 	OutcomeLaneOutage
+	// OutcomeLaneNotReady means a non-provider lane could not dial its backend
+	// AND has never reached it since boot (ErrLaneNotReady): a startup race. It
+	// ranks identically to OutcomeLaneOutage (above a benign miss, BELOW a
+	// provider transport failure) so it can never mask a genuine provider
+	// failure, but the worker treats it as a penalty-free release rather than a
+	// deferral (#567).
+	OutcomeLaneNotReady
 	// OutcomeTransport means a retriable failure that is not a clean miss
 	// (timeout, connection failure, an unexpected error).
 	OutcomeTransport
@@ -89,6 +104,8 @@ func ClassifyOutcome(err error) OutcomeClass {
 	case musixmatch.IsBenignMiss(err), errors.Is(err, musixmatch.ErrTruncatedResponse),
 		errors.Is(err, ErrLaneBenignMiss):
 		return OutcomeBenignMiss
+	case errors.Is(err, ErrLaneNotReady):
+		return OutcomeLaneNotReady
 	case errors.Is(err, ErrLaneOutage):
 		return OutcomeLaneOutage
 	default:
@@ -107,6 +124,8 @@ func (c OutcomeClass) precedence() int {
 	case OutcomeBenignMiss:
 		return 1
 	case OutcomeLaneOutage:
+		return 2
+	case OutcomeLaneNotReady:
 		return 2
 	case OutcomeTransport:
 		return 3

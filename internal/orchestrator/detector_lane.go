@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/sydlexius/canticle/internal/circuit"
 	"github.com/sydlexius/canticle/internal/detector"
@@ -13,6 +14,14 @@ import (
 
 // detectorLaneName is the lane name a detector-backed lane reports.
 const detectorLaneName = "detector"
+
+// notReadyBound caps how many consecutive "not ready" (dial-refused, never
+// reached) results a detector lane emits before escalating to a genuine outage.
+// A sidecar that is merely booting comes up within a few work cycles; one that
+// has never been reachable is misconfigured or dead, and must trip the breaker
+// so the lane stops re-spending a rate-limited provider call every cycle (#567).
+// This is an attempt count, not a wall-clock sleep (which the issue forbids).
+const notReadyBound = 5
 
 // NewDetectorLane builds an orchestrator lane over the audio detector and its
 // dedicated breaker. The resolve func runs the 3-gate over the work item's audio
@@ -29,6 +38,13 @@ const detectorLaneName = "detector"
 // detector-owned one -- the detector has no throttle concept of its own; it is
 // only ever crediting recovery of the provider's adaptive interval.
 func NewDetectorLane(d detector.Detector, breaker *circuit.Breaker, pacer providers.AdaptivePacer) *Lane {
+	// everReached records whether the lane has ever completed a detector call
+	// since this process booted; notReadyStreak counts consecutive dial failures
+	// while it has not. Together they distinguish a boot race (release, no trip)
+	// from a die-after-up or dead-from-boot sidecar (outage, trip) -- see #567.
+	// These are lane-global across work items, captured in the resolve closure.
+	var everReached atomic.Bool
+	var notReadyStreak atomic.Uint32
 	return &Lane{
 		name:        detectorLaneName,
 		breaker:     breaker,
@@ -61,11 +77,25 @@ func NewDetectorLane(d detector.Detector, breaker *circuit.Breaker, pacer provid
 			}
 			res, err := d.Detect(ctx, sourcePath)
 			if err != nil {
+				// A dial-level failure (sidecar unreachable) is a startup race ONLY
+				// until the lane has reached the sidecar once since boot, and only
+				// for the first notReadyBound attempts. Beyond that -- or after any
+				// prior success -- an unreachable sidecar is a genuine outage that
+				// must trip the breaker (#567). Any non-dial detector error (a
+				// non-2xx status, an ffmpeg sampling failure) is always an outage.
+				//
 				// Join rather than %v so BOTH the sentinel and the detector's own
-				// cause stay matchable with errors.Is: the classifier keys on
-				// ErrLaneOutage, while callers and logs need the underlying failure.
+				// cause stay matchable with errors.Is: the classifier keys on the
+				// sentinel, while callers and logs need the underlying failure.
+				if errors.Is(err, detector.ErrClassifierNotReady) &&
+					!everReached.Load() && notReadyStreak.Load() < notReadyBound {
+					notReadyStreak.Add(1)
+					return models.Song{}, fmt.Errorf("detector not ready: %w", errors.Join(ErrLaneNotReady, err))
+				}
 				return models.Song{}, fmt.Errorf("detector request failed: %w", errors.Join(ErrLaneOutage, err))
 			}
+			everReached.Store(true)
+			notReadyStreak.Store(0)
 			if !res.Instrumental {
 				return models.Song{}, ErrLaneBenignMiss
 			}

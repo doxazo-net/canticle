@@ -2168,6 +2168,57 @@ func TestRunOnceDetectorErrorTreatsAsMiss(t *testing.T) {
 	}
 }
 
+// TestRunOnceDetectorNotReadyReleasesWithoutDeferring verifies the #567 fix: a
+// detector dial failure before the lane has ever reached the sidecar (a startup
+// race) RELEASES the item back to pending -- no defer, no miss increment, no
+// cooldown -- rather than deferring it (which would charge the track a miss
+// toward retirement plus a multi-day cooldown for a pure boot race).
+func TestRunOnceDetectorNotReadyReleasesWithoutDeferring(t *testing.T) {
+	track := models.Track{ArtistName: "Singer", TrackName: "Song"}
+	q := &fakeQueue{items: []queue.WorkItem{{
+		ID: 210,
+		Inputs: models.Inputs{
+			Track:      track,
+			Outdir:     "out",
+			Filename:   "song.lrc",
+			SourcePath: "/music/song.flac",
+		},
+	}}}
+	c := &fakeCache{}
+	// Providers miss; the detector sidecar is unreachable (still booting): a
+	// dial failure wrapped in the not-ready sentinel, on a worker that has never
+	// reached the sidecar.
+	fetcher := &fakeFetcher{err: musixmatch.ErrNoLyrics}
+	writer := &fakeWriter{}
+	det := &fakeDetector{err: fmt.Errorf("detector classify: %w: dial tcp: connect: connection refused", detector.ErrClassifierNotReady)}
+
+	w := New(q, c, fetcher, writer)
+	w.EnableAudioDetector(det)
+	w.SetInstrumentalDetectionDefault(true)
+
+	// A not-ready detector releases the item and returns nil so the run loop
+	// keeps draining the rest of the queue -- it must NOT return errIdle (which
+	// errLanesUnavailable wraps), because that would halt the whole pass on a
+	// single booting-detector item even though the providers are healthy (#567).
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce = %v; want nil (penalty-free release, keep draining)", err)
+	}
+
+	// Released, NOT deferred / failed / retired.
+	if len(q.released) != 1 || q.released[0] != 210 {
+		t.Fatalf("released = %v; want [210]", q.released)
+	}
+	if len(q.deferred) != 0 {
+		t.Fatalf("deferred = %v; want none (a boot race must not defer)", q.deferred)
+	}
+	if len(q.failed) != 0 {
+		t.Fatalf("failed = %v; want none", q.failed)
+	}
+	if len(q.retired) != 0 {
+		t.Fatalf("retired = %v; want none", q.retired)
+	}
+}
+
 // TestRunOnceDetectorDisabledWhenNilSourcePath verifies that the detector is
 // skipped when the source path is empty (no audio file available for detection).
 func TestRunOnceDetectorDisabledWhenNilSourcePath(t *testing.T) {

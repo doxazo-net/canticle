@@ -17,9 +17,16 @@ import (
 	"errors"
 )
 
-// ErrClassifierUnavailable is returned when the classifier HTTP endpoint
-// cannot be reached or returns a non-2xx status.
+// ErrClassifierUnavailable is returned when the classifier HTTP endpoint is
+// reachable but returns a non-2xx status.
 var ErrClassifierUnavailable = errors.New("detector: classifier unavailable")
+
+// ErrClassifierNotReady is returned when the classifier endpoint cannot be
+// dialed at all (connection refused / no route) -- the transport never
+// completed. It is split from ErrClassifierUnavailable (a reachable endpoint
+// returning a non-2xx status) so callers can treat a sidecar that is still
+// booting differently from one that is genuinely broken (issue #567).
+var ErrClassifierNotReady = errors.New("detector: classifier not ready")
 
 // ErrInvalidResponse is returned when the classifier returns a response that
 // cannot be decoded as a class-probability map.

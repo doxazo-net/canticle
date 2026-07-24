@@ -23,6 +23,7 @@ func TestClassifyOutcome(t *testing.T) {
 		{"no lyrics is benign miss", fmt.Errorf("x: %w", musixmatch.ErrNoLyrics), OutcomeBenignMiss},
 		{"truncated is benign miss", fmt.Errorf("x: %w", musixmatch.ErrTruncatedResponse), OutcomeBenignMiss},
 		{"generic error is transport", errors.New("connection refused"), OutcomeTransport},
+		{"lane not ready", fmt.Errorf("x: %w", ErrLaneNotReady), OutcomeLaneNotReady},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -62,6 +63,27 @@ func TestClassifyOutcome_LaneSentinels(t *testing.T) {
 	}
 	if got := ClassifyOutcome(ErrLaneOutage); got != OutcomeLaneOutage {
 		t.Errorf("outage sentinel = %v, want OutcomeLaneOutage", got)
+	}
+	if got := ClassifyOutcome(ErrLaneNotReady); got != OutcomeLaneNotReady {
+		t.Errorf("not-ready sentinel = %v, want OutcomeLaneNotReady", got)
+	}
+}
+
+// TestOutcomeLaneNotReady_RanksBelowTransport pins the same masking guard as the
+// outage case: a not-ready detector (startup race) must outrank a clean benign
+// miss but stay strictly below a provider transport failure, so it can never
+// become the surfaced error and downgrade a genuine provider failure (#567).
+func TestOutcomeLaneNotReady_RanksBelowTransport(t *testing.T) {
+	if OutcomeLaneNotReady.precedence() != 2 {
+		t.Fatalf("OutcomeLaneNotReady precedence = %d; want 2", OutcomeLaneNotReady.precedence())
+	}
+	if OutcomeLaneNotReady.precedence() >= OutcomeTransport.precedence() {
+		t.Fatalf("not-ready (%d) must rank below transport (%d)",
+			OutcomeLaneNotReady.precedence(), OutcomeTransport.precedence())
+	}
+	if OutcomeLaneNotReady.precedence() <= OutcomeBenignMiss.precedence() {
+		t.Fatalf("not-ready (%d) must rank above benign miss (%d)",
+			OutcomeLaneNotReady.precedence(), OutcomeBenignMiss.precedence())
 	}
 }
 
