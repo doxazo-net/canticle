@@ -244,6 +244,157 @@ func TestRun_SkipsStillNonPassingRow(t *testing.T) {
 	}
 }
 
+// TestRun_AfterIDResumeCursor verifies the engine threads AfterID into the
+// listing and reports MaxExaminedID for the next run's cursor (#516). The
+// multi-row id ordering is covered at the queue layer
+// (TestListVocalGateRejections_AfterID); here one still-non-passing row proves
+// the threading and the cursor bookkeeping.
+func TestRun_AfterIDResumeCursor(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+
+	// Still non-passing (VocalPeak above the gate) so it is skipped, not mutated,
+	// and stays selectable for the second run -- the exact stall #516 addresses.
+	id := seedRejection(t, q, "/music/spoken.flac", queue.InstrumentalTelemetry{
+		MusicSum: 0.97, VocalPeak: 0.50, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.18.0",
+	})
+
+	w := &fakeWriter{}
+	r := New(q, w)
+	opts := Options{DryRun: false, MinConfidence: 0.90, VocalMax: 0.30, SpeechMax: 0.20, CurrentVersion: "1.18.0"}
+
+	// No cursor: the row is examined; MaxExaminedID reports its id.
+	res, err := r.Run(ctx, opts)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Total != 1 || res.MaxExaminedID != id {
+		t.Fatalf("run: Total=%d MaxExaminedID=%d; want 1 and %d", res.Total, res.MaxExaminedID, id)
+	}
+
+	// Cursor at the row's id: it is excluded, nothing left, MaxExaminedID resets 0.
+	optsAfter := opts
+	optsAfter.AfterID = id
+	res, err = r.Run(ctx, optsAfter)
+	if err != nil {
+		t.Fatalf("run after-id: %v", err)
+	}
+	if res.Total != 0 || res.MaxExaminedID != 0 {
+		t.Fatalf("after-id run: Total=%d MaxExaminedID=%d; want 0 and 0 (cursor excludes the row)", res.Total, res.MaxExaminedID)
+	}
+}
+
+// TestRun_OutcomeReportsApplied verifies that a version-matched settle fires an
+// Outcome{applied} AFTER the mutation, so the backup trail records the realized
+// result and not just the pre-mutation intent (#515).
+func TestRun_OutcomeReportsApplied(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+
+	id := seedRejection(t, q, "/music/violin.flac", queue.InstrumentalTelemetry{
+		MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.18.0",
+	})
+
+	var reports []Change
+	var outcomes []Outcome
+	r := New(q, &fakeWriter{})
+	res, err := r.Run(ctx, Options{
+		DryRun: false, MinConfidence: 0.90, VocalMax: 0.30, SpeechMax: 0.20, CurrentVersion: "1.18.0",
+		Report:  func(ch Change) error { reports = append(reports, ch); return nil },
+		Outcome: func(o Outcome) error { outcomes = append(outcomes, o); return nil },
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Settled != 1 {
+		t.Fatalf("Settled=%d; want 1", res.Settled)
+	}
+	if len(reports) != 1 || reports[0].QueueID != id {
+		t.Fatalf("reports=%+v; want one intent record for id=%d", reports, id)
+	}
+	if len(outcomes) != 1 || outcomes[0].QueueID != id || outcomes[0].Status != OutcomeApplied || outcomes[0].Ambiguous {
+		t.Fatalf("outcomes=%+v; want one {id=%d applied} record", outcomes, id)
+	}
+}
+
+// TestRun_OutcomeReportsSkippedOnClaim verifies a worker-claimed row (settle
+// returns SettleClaimed) fires Outcome{skipped}, so a restore does not try to
+// revert a change that never landed (#515).
+func TestRun_OutcomeReportsSkippedOnClaim(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+	claimed := queue.SettleClaimed
+	store := &fakeStore{DBQueue: q, settleOutcome: &claimed}
+
+	seedRejection(t, q, "/music/violin.flac", queue.InstrumentalTelemetry{
+		MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.18.0",
+	})
+
+	var outcomes []Outcome
+	r := New(store, &fakeWriter{})
+	if _, err := r.Run(ctx, Options{
+		DryRun: false, MinConfidence: 0.90, VocalMax: 0.30, SpeechMax: 0.20, CurrentVersion: "1.18.0",
+		Outcome: func(o Outcome) error { outcomes = append(outcomes, o); return nil },
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(outcomes) != 1 || outcomes[0].Status != OutcomeSkipped {
+		t.Fatalf("outcomes=%+v; want one skipped record", outcomes)
+	}
+}
+
+// TestRun_OutcomeReportsAmbiguousOnSettleError verifies a settle error (ambiguous
+// commit) fires Outcome{failed, ambiguous}, flagging that the change may have
+// landed and must be verified before a restore reverts it (#515).
+func TestRun_OutcomeReportsAmbiguousOnSettleError(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+	store := &fakeStore{DBQueue: q, settleErr: errors.New("commit failed")}
+
+	seedRejection(t, q, "/music/violin.flac", queue.InstrumentalTelemetry{
+		MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.18.0",
+	})
+
+	var outcomes []Outcome
+	r := New(store, &fakeWriter{})
+	res, err := r.Run(ctx, Options{
+		DryRun: false, MinConfidence: 0.90, VocalMax: 0.30, SpeechMax: 0.20, CurrentVersion: "1.18.0",
+		Outcome: func(o Outcome) error { outcomes = append(outcomes, o); return nil },
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Errors != 1 {
+		t.Fatalf("Errors=%d; want 1", res.Errors)
+	}
+	if len(outcomes) != 1 || outcomes[0].Status != OutcomeFailed || !outcomes[0].Ambiguous {
+		t.Fatalf("outcomes=%+v; want one {failed ambiguous} record", outcomes)
+	}
+}
+
+// TestRun_DryRunEmitsNoOutcome verifies a dry run never fires Outcome (it mutates
+// nothing, so there is no realized result to record) (#515).
+func TestRun_DryRunEmitsNoOutcome(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+
+	seedRejection(t, q, "/music/violin.flac", queue.InstrumentalTelemetry{
+		MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.18.0",
+	})
+
+	outcomeCalls := 0
+	r := New(q, &fakeWriter{})
+	if _, err := r.Run(ctx, Options{
+		DryRun: true, MinConfidence: 0.90, VocalMax: 0.30, SpeechMax: 0.20, CurrentVersion: "1.18.0",
+		Outcome: func(Outcome) error { outcomeCalls++; return nil },
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if outcomeCalls != 0 {
+		t.Fatalf("Outcome fired %d times in a dry run; want 0", outcomeCalls)
+	}
+}
+
 func TestRun_DryRunDoesNotMutate(t *testing.T) {
 	ctx := context.Background()
 	q := openTestQueue(t)
@@ -559,14 +710,23 @@ func TestRun_SettleAlreadyInstrumentalKeepsMarker(t *testing.T) {
 
 	w := &fakeWriter{}
 	r := New(store, w)
+	var outcomes []Outcome
 	res, err := r.Run(ctx, Options{
 		DryRun: false, MinConfidence: 0.90, VocalMax: 0.30, SpeechMax: 0.20, CurrentVersion: "1.18.0",
+		Outcome: func(o Outcome) error { outcomes = append(outcomes, o); return nil },
 	})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if res.Settled != 0 || res.SkippedClaimed != 0 || res.Errors != 0 || res.MarkersWritten != 1 {
 		t.Fatalf("expected the marker kept and no error/skip/settle counted, got %+v", res)
+	}
+	// A peer-settled row reports OutcomeApplied (the verdict is on disk), even
+	// though a DIFFERENT actor established it -- the documented #515 contract this
+	// test pins. If this ever changes to a distinct status, update the engine
+	// comment and the restore contract together.
+	if len(outcomes) != 1 || outcomes[0].Status != OutcomeApplied || outcomes[0].Ambiguous {
+		t.Fatalf("outcomes=%+v; want one applied record for the peer-settled row", outcomes)
 	}
 }
 

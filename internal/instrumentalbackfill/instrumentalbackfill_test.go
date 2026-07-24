@@ -186,6 +186,80 @@ func TestRun_SettlesInstrumentalRowBackupFirst(t *testing.T) {
 	}
 }
 
+// TestRun_OutcomeReportsAppliedAfterSettle verifies the realized-outcome callback
+// fires applied AFTER the settle, so the backup trail records what landed and not
+// just intent (#515).
+func TestRun_OutcomeReportsAppliedAfterSettle(t *testing.T) {
+	var order []string
+	store := newFakeStore(item(1, "/music/a.flac"))
+	store.order = &order
+	w := &fakeWriter{order: &order}
+
+	var outcomes []Outcome
+	_, err := New(store, fakeDetector{res: instrumentalVerdict()}, w).Run(context.Background(), Options{
+		GlobalDetectDefault: true,
+		Report:              func(Change) error { order = append(order, "backup"); return nil },
+		Outcome: func(o Outcome) error {
+			order = append(order, "outcome")
+			outcomes = append(outcomes, o)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(outcomes) != 1 || outcomes[0].QueueID != 1 || outcomes[0].Status != OutcomeApplied || outcomes[0].Ambiguous {
+		t.Fatalf("outcomes=%+v; want one {id=1 applied} record", outcomes)
+	}
+	// Outcome must come AFTER the settle -- it reports the realized result.
+	want := []string{"backup", "marker", "settle", "outcome"}
+	if len(order) != len(want) {
+		t.Fatalf("order = %v; want %v", order, want)
+	}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("order = %v; want %v", order, want)
+		}
+	}
+}
+
+// TestRun_OutcomeReportsSkippedOnClaim verifies a stamp-claimed negative verdict
+// fires skipped (nothing landed), and TestRun_OutcomeReportsAmbiguous the
+// ambiguous-settle failed case (#515).
+func TestRun_OutcomeReportsSkippedOnClaim(t *testing.T) {
+	store := newFakeStore(item(1, "/music/a.flac"))
+	store.stampClaimed = true // negative verdict, but a worker claimed the row
+
+	var outcomes []Outcome
+	_, err := New(store, fakeDetector{res: detector.Result{Instrumental: false, Version: "v1"}}, &fakeWriter{}).Run(context.Background(), Options{
+		GlobalDetectDefault: true,
+		Outcome:             func(o Outcome) error { outcomes = append(outcomes, o); return nil },
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(outcomes) != 1 || outcomes[0].Status != OutcomeSkipped {
+		t.Fatalf("outcomes=%+v; want one skipped record", outcomes)
+	}
+}
+
+func TestRun_OutcomeReportsAmbiguousOnSettleError(t *testing.T) {
+	store := newFakeStore(item(1, "/music/a.flac"))
+	store.settleErr = errors.New("commit failed")
+
+	var outcomes []Outcome
+	_, err := New(store, fakeDetector{res: instrumentalVerdict()}, &fakeWriter{}).Run(context.Background(), Options{
+		GlobalDetectDefault: true,
+		Outcome:             func(o Outcome) error { outcomes = append(outcomes, o); return nil },
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(outcomes) != 1 || outcomes[0].Status != OutcomeFailed || !outcomes[0].Ambiguous {
+		t.Fatalf("outcomes=%+v; want one {failed ambiguous} record", outcomes)
+	}
+}
+
 // A Report failure must abort that row's mutation entirely: the whole point of
 // backup-first is that a change never exists without its restorable record.
 func TestRun_ReportFailureAbortsRowMutation(t *testing.T) {
@@ -515,14 +589,24 @@ func TestRun_PeerSettledRowKeepsItsMarker(t *testing.T) {
 	store := newFakeStore(it)
 	store.settleOutcome = queue.SettleAlreadyInstrumental // a peer got there first
 
+	var outcomes []Outcome
 	res, err := New(store, fakeDetector{res: instrumentalVerdict()}, lyrics.NewLRCWriter()).Run(
-		context.Background(), Options{GlobalDetectDefault: true, Report: func(Change) error { return nil }})
+		context.Background(), Options{
+			GlobalDetectDefault: true,
+			Report:              func(Change) error { return nil },
+			Outcome:             func(o Outcome) error { outcomes = append(outcomes, o); return nil },
+		})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
 	if res.SkippedAlreadySettled != 1 {
 		t.Errorf("res = %+v; want SkippedAlreadySettled=1", res)
+	}
+	// The peer-settled row reports OutcomeApplied (verdict on disk), the documented
+	// #515 contract -- see the engine comment on this arm. Pin it here.
+	if len(outcomes) != 1 || outcomes[0].Status != OutcomeApplied || outcomes[0].Ambiguous {
+		t.Fatalf("outcomes=%+v; want one applied record", outcomes)
 	}
 	for _, p := range MarkerPaths(it.Inputs) {
 		if _, err := os.Stat(p); err != nil {

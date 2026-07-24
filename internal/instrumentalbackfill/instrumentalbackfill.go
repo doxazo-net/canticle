@@ -78,6 +78,30 @@ type Change struct {
 	Telemetry   queue.InstrumentalTelemetry
 }
 
+// Outcome statuses reported to Options.Outcome after a change's mutation
+// resolves. The intent record (Options.Report) is written BEFORE the mutation for
+// crash safety and so cannot say whether the change landed; a restore must
+// consult the matching Outcome and replay only the ones confirmed applied (#515).
+// This mirrors internal/instrumentalrecalib's Outcome so both sibling reconcile
+// commands share the same backup-trail contract.
+const (
+	OutcomeApplied = "applied" // mutation committed (settled, stamped, or a peer settled it)
+	OutcomeSkipped = "skipped" // worker-claimed / row-gone: nothing written, nothing to revert
+	OutcomeFailed  = "failed"  // a Report/stamp/marker error, or an ambiguous settle (see Ambiguous)
+)
+
+// Outcome is the realized result of one change, handed to Options.Outcome after
+// the mutation resolves so the backup trail records what actually happened rather
+// than only intent (#515). Keyed by QueueID to the earlier Report record.
+type Outcome struct {
+	QueueID int64
+	Status  string
+	// Ambiguous marks the settle-commit-unknown case: the settle may have landed
+	// and the marker was left in place, so a restore must verify before reverting
+	// rather than treat it as a clean no-op.
+	Ambiguous bool
+}
+
 // Result counts one Run.
 //
 // The verdict counts and the mutation counts are deliberately separate axes.
@@ -118,6 +142,13 @@ type Options struct {
 	// aborts that row's mutation and counts an error; it never aborts the Run.
 	// Nil disables it.
 	Report func(Change) error
+	// Outcome is invoked once per change AFTER its mutation resolves, carrying the
+	// realized result (applied/skipped/failed) so the backup trail records what
+	// actually happened, not just the earlier Report intent (#515). Fires for
+	// every row that reached the mutation stage, including a Report failure. Never
+	// fires in a dry run. An Outcome error is best-effort logged and does not abort
+	// the Run. Nil disables it.
+	Outcome func(Outcome) error
 	// Preview is invoked once per instrumental change in a dry run instead of
 	// mutating. Nil disables it.
 	Preview func(Change)
@@ -226,6 +257,7 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 			if opts.Report != nil {
 				if err := opts.Report(change); err != nil {
 					res.Errors++
+					b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeFailed})
 					continue
 				}
 			}
@@ -233,13 +265,16 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 			stamped, err := b.store.StampUnclassifiedMiss(ctx, item.ID, tel)
 			if err != nil {
 				res.Errors++
+				b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeFailed})
 				continue
 			}
 			if !stamped {
 				res.SkippedClaimed++
+				b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeSkipped})
 				continue
 			}
 			res.RowsStamped++
+			b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeApplied})
 			continue
 		}
 
@@ -257,6 +292,7 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 		if opts.Report != nil {
 			if err := opts.Report(change); err != nil {
 				res.Errors++
+				b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeFailed})
 				continue
 			}
 		}
@@ -272,6 +308,7 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 			// claim instrumental against an incomplete set of sidecars. The DB was not
 			// touched, so removing what did land is unambiguously correct.
 			res.MarkersWritten -= b.rollback(written, &res)
+			b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeFailed})
 			continue
 		}
 
@@ -287,30 +324,57 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 			res.Errors++
 			slog.Warn("instrumentalbackfill: settle failed after the marker was written; leaving the marker in place because the commit outcome is unknown",
 				"id", item.ID, "markers", written, "error", err)
+			b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeFailed, Ambiguous: true})
 			continue
 		}
 
 		switch outcome {
 		case queue.Settled:
 			res.RowsSettled++
+			b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeApplied})
 		case queue.SettleAlreadyInstrumental:
 			// A PEER BACKFILL settled this row first with the same verdict. The marker
 			// on disk is correct -- it is the peer's, and ours is byte-identical. Do
 			// NOT remove it: that would delete a valid result over a race we lost
 			// harmlessly.
+			//
+			// OutcomeApplied reflects the end STATE (row done+instrumental), not
+			// authorship: the DB verdict was established by a DIFFERENT actor
+			// (classifyNoSettle keys only on status='done' AND instrumental_result=1).
+			// A future restore reverting OutcomeApplied rows will also revert a
+			// peer-established verdict -- sound as a state reversal, but if actor
+			// attribution ever matters this arm is where a distinct status belongs.
+			// No restore tool exists yet (#515).
 			res.SkippedAlreadySettled++
+			b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeApplied})
 		case queue.SettleClaimed, queue.SettleRowGone:
 			// A worker owns the row, or it is gone. Nothing was written to the DB, so
 			// our marker is an orphan the database has no record of: take it back.
 			res.MarkersWritten -= b.rollback(written, &res)
 			res.SkippedClaimed++
+			b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeSkipped})
 		case queue.SettleFailed:
 			// Unreachable: a failure returns a non-nil error, handled above.
 			res.Errors++
+			b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeFailed})
 		}
 	}
 
 	return res, nil
+}
+
+// reportOutcome hands a realized Outcome to Options.Outcome when set. An error
+// from the callback is best-effort logged and swallowed: the mutation already
+// happened, so failing to append its outcome record must not abort the Run or
+// change the row's fate -- it only degrades the backup trail's completeness (#515).
+func (b *Backfiller) reportOutcome(opts Options, o Outcome) {
+	if opts.Outcome == nil {
+		return
+	}
+	if err := opts.Outcome(o); err != nil {
+		slog.Warn("instrumentalbackfill: could not record change outcome to the backup trail",
+			"id", o.QueueID, "status", o.Status, "error", err)
+	}
 }
 
 // writeMarkers writes the instrumental marker to every output path for item,

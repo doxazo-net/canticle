@@ -505,6 +505,45 @@ func TestListVocalGateRejections_Limit(t *testing.T) {
 	}
 }
 
+// TestListVocalGateRejections_AfterID verifies the resume cursor: AfterID
+// excludes every row at or below that work_queue id, so a repeated --limit run
+// advances past low-id rows a prior pass already examined instead of re-selecting
+// them (#516).
+func TestListVocalGateRejections_AfterID(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+
+	var ids []int64
+	for i := 0; i < 3; i++ {
+		id := seedDeferredRow(t, q, "Artist", fmt.Sprintf("Title%d", i), fmt.Sprintf("/music/%d.flac", i))
+		if _, err := q.StampUnclassifiedMiss(ctx, id, InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0"}); err != nil {
+			t.Fatalf("stamp: %v", err)
+		}
+		ids = append(ids, id)
+	}
+
+	// Cursor at the first row's id: only the two higher-id rows remain, in id order.
+	got, err := q.ListVocalGateRejections(ctx, ListVocalGateRejectionsOptions{AfterID: ids[0]})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d; want 2 (AfterID must exclude rows <= the cursor)", len(got))
+	}
+	if got[0].ID != ids[1] || got[1].ID != ids[2] {
+		t.Fatalf("got ids [%d %d]; want [%d %d] (ascending, past the cursor)", got[0].ID, got[1].ID, ids[1], ids[2])
+	}
+
+	// AfterID composes with Limit: cursor past the first, cap at one -> just ids[1].
+	got, err = q.ListVocalGateRejections(ctx, ListVocalGateRejectionsOptions{AfterID: ids[0], Limit: 1})
+	if err != nil {
+		t.Fatalf("list with limit: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != ids[1] {
+		t.Fatalf("got %+v; want single row id=%d", got, ids[1])
+	}
+}
+
 func TestListDetectorInstrumentalMarkers(t *testing.T) {
 	q := NewDBQueue(openQueueTestDB(t))
 	ctx := context.Background()

@@ -2087,6 +2087,12 @@ func (q *DBQueue) ListInstrumental(ctx context.Context, opts ListInstrumentalOpt
 type ListVocalGateRejectionsOptions struct {
 	LibraryID *int64
 	Limit     int
+	// AfterID is a resume cursor: when > 0, only rows whose work_queue id is
+	// strictly greater are returned. Because rows are listed ORDER BY id and a
+	// non-passing row is skipped (not mutated), a repeated small --limit run
+	// would otherwise re-select the same low-id non-passing rows forever; passing
+	// the highest id examined by the prior run advances past them (#516).
+	AfterID int64
 }
 
 // StampedRejection is one instrumental_result=0 row with its stored telemetry,
@@ -2139,6 +2145,12 @@ func (q *DBQueue) ListVocalGateRejections(ctx context.Context, opts ListVocalGat
 	libClause, libArgs := recheckLibraryClause(opts.LibraryID)
 	query += libClause //nolint:gosec // G202: libClause is a package-constant fragment from recheckLibraryClause, never user-built SQL
 	args = append(args, libArgs...)
+	// Resume cursor (#516): exclude rows a prior --limit pass already examined.
+	// Bound before the ORDER BY / LIMIT so the cap applies to the remaining rows.
+	if opts.AfterID > 0 {
+		query += ` AND id > ?`
+		args = append(args, opts.AfterID)
+	}
 	query += ` ORDER BY id`
 	if opts.Limit > 0 {
 		query += ` LIMIT ?`

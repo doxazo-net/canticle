@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -352,5 +353,66 @@ func TestRunReconcileInstrumental_DetectorNotConfigured(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "backfill instrumental verdicts") {
 		t.Errorf("message should name this command, not the sibling reconcile; got:\n%s", buf.String())
+	}
+}
+
+// TestRunReconcileInstrumental_BackupRecordsOutcome verifies the backfill CLI
+// writes BOTH an intent and an outcome (applied) JSONL record, mirroring the
+// recalibrate sibling so both share the backup-trail contract (#515).
+func TestRunReconcileInstrumental_BackupRecordsOutcome(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	outdir := filepath.Join(dir, "music")
+	if err := os.MkdirAll(outdir, 0o755); err != nil {
+		t.Fatalf("mkdir music: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(instrumentalClassifierResponse))
+	}))
+	defer srv.Close()
+	cfgPath := filepath.Join(dir, "config.toml")
+	writeReconcileCfg(t, cfgPath, dbPath, srv.URL, fakeFFmpegCmd(t))
+	id := seedUnclassifiedDeferred(t, ctx, dbPath, outdir)
+	backupPath := filepath.Join(dir, "backup.jsonl")
+
+	var buf bytes.Buffer
+	if code := runReconcileInstrumental(ctx, &buf, ScanReconcileInstrumentalCmd{
+		ConfigPath: cfgPath, Yes: true, Backup: backupPath,
+	}); code != 0 {
+		t.Fatalf("exit=%d\n%s", code, buf.String())
+	}
+
+	data, err := os.ReadFile(backupPath) //nolint:gosec // G304: test-controlled path
+	if err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	var sawIntent, sawOutcome bool
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var rec struct {
+			Type    string `json:"type"`
+			QueueID int64  `json:"queue_id"`
+			Outcome string `json:"outcome"`
+		}
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("unmarshal %q: %v", line, err)
+		}
+		if rec.QueueID != id {
+			t.Fatalf("record for id=%d; want %d", rec.QueueID, id)
+		}
+		switch rec.Type {
+		case "intent":
+			sawIntent = true
+		case "outcome":
+			sawOutcome = true
+			if rec.Outcome != "applied" {
+				t.Errorf("outcome=%q; want applied", rec.Outcome)
+			}
+		default:
+			t.Fatalf("unexpected record type %q", rec.Type)
+		}
+	}
+	if !sawIntent || !sawOutcome {
+		t.Fatalf("backup missing records: intent=%v outcome=%v\n%s", sawIntent, sawOutcome, data)
 	}
 }
